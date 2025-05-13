@@ -7,13 +7,12 @@ Accurate forecasting of avian influenza outbreaks within wild bird populations r
 ## 🗂️ Repository structure
 
 ```
-├── HeteroGraphNetwork.py   # Core GNN layers + fusion gates
-├── FullHeteroGNN.py        # Wrapper that assembles encoder/decoder + MRF
+├── HeteroGraphNetwork.py   # BLUE implementation
 ├── MRF.py                  # Markov Random Field smoothing module
 ├── simple_graph_dataset.py # Windowed time‑series dataset loader
-├── metrics.py              # MAE / RMSE / PCC utilities
-├── Model_metrics.py        # Extra post‑hoc evaluation helpers
-├── spactral_simple_main.py # Train / eval entry‑point
+├── metrics.py              # Prediction process
+├── Model_metrics.py        # MAE / RMSE / PCC /F1 Score evaluation metrics
+├── spactral_simple_main.py # Train / Val / Eval entry‑point
 └── requirements.txt        # environments
 ```
 
