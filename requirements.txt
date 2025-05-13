@@ -1,0 +1,12 @@
+networkx==3.3
+pandas==2.2.3
+pillow==11.0.0
+propcache==0.3.1
+scikit-learn==1.6.1
+threadpoolctl==3.6.0
+torch==2.6.0+cu126
+torch-geometric==2.6.1
+torch_scatter==2.1.2+pt26cu126
+torchaudio==2.6.0+cu126
+torchvision==0.21.0+cu126
+tqdm==4.67.1
