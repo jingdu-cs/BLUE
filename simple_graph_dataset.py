@@ -22,7 +22,7 @@ class SimpleGraphDataset(Dataset):
             window_size: Number of consecutive weeks to use as input
             prediction_horizon: Number of weeks to predict
             train_ratio: Ratio of data to use for training
-            norm_mode: Normalization mode, 'minmax' or 'z_score'
+            norm_mode: Normalization mode, 'minmax', 'z_score', or 'log_minmax'
             dataset: Dataset type, 'avian' or 'japan'
         """
         self.graphs_dir = graphs_dir
@@ -40,6 +40,7 @@ class SimpleGraphDataset(Dataset):
         self.is_train = True
         self.norm_mode = norm_mode
         self.norm_list = []  # Store normalization parameters for each channel
+        self.epsilon = 1e-6  # 用于log变换中避免log(0)
         
         self._load_file_paths()
         
@@ -232,6 +233,16 @@ class SimpleGraphDataset(Dataset):
                 c_std = self.norm_list[c]['std']
                 flow_c = (x[..., c] - c_mean) / c_std
                 x_norm.append(flow_c)
+            elif self.norm_mode == 'log_minmax':
+                log_min = self.norm_list[c]['log_min']
+                log_max = self.norm_list[c]['log_max']
+                # 应用log变换
+                log_transformed = torch.log(x[..., c] + self.epsilon)
+                # 应用min-max归一化
+                denominator = log_max - log_min
+                denominator = torch.where(denominator == 0, torch.ones_like(denominator), denominator)
+                flow_c = (log_transformed - log_min) / denominator
+                x_norm.append(flow_c)
             else:
                 raise ValueError(f"Unsupported normalization mode: {self.norm_mode}")
 
@@ -240,19 +251,14 @@ class SimpleGraphDataset(Dataset):
     
     def channel_wise_denormalize(self, y, size):
         """Denormalize features channel-wise."""
-        # assert y.shape[-1] == len(self.norm_list)
-        
         y_denorm = []
-        # print(f'y.shape: {y.shape}')
-        # print(f'y.shape[-1]: {y.shape[-1]}')
-        # print(f'len(self.norm_list): {len(self.norm_list)}')
         for c in range(y.shape[-1]):
             if self.norm_mode == 'minmax':
                 y_denorm.append(self.minmax_denormalize(y[..., c], c))
-                # print(f'y_denorm: {y_denorm[-1]}')
             elif self.norm_mode == 'z_score':
                 y_denorm.append(self.z_score_denormalize(y[..., c], c))
-                # print(f'y_denorm: {y_denorm[-1]}')
+            elif self.norm_mode == 'log_minmax':
+                y_denorm.append(self.log_minmax_denormalize(y[..., c], c))
             else:
                 raise ValueError(f"Unsupported normalization mode: {self.norm_mode}")
         y_denorm = torch.stack(y_denorm, dim=-1)
@@ -260,16 +266,27 @@ class SimpleGraphDataset(Dataset):
     
     def minmax_normalize(self, x):
         """Min-max normalization to [0, 1]."""
-        x_max = x.max()
-        x_min = x.min()
-        denominator = x_max - x_min
-        denominator = torch.where(denominator == 0, torch.ones_like(denominator), denominator)
-        x = (x - x_min) / denominator
+        # x_max = x.max()
+        # x_min = x.min()
+        # denominator = x_max - x_min
+        # denominator = torch.where(denominator == 0, torch.ones_like(denominator), denominator)
+        # x = (x - x_min) / denominator
+        # return x, x_min, x_max
+        x_max, x_min = x.max(), x.min()
+        x = (x - x_min) / (x_max - x_min)
+        #x = x * 2 - 1
         return x, x_min, x_max
     
     def minmax_denormalize(self, x, c):
         """Min-max denormalization."""
-        x = (self.norm_list[c]['max'] - self.norm_list[c]['min']) * x + self.norm_list[c]['min']
+        if isinstance(x, np.ndarray):
+            x_tensor = torch.from_numpy(x).float()
+        else:
+            x_tensor = x.float() if not x.is_floating_point() else x
+        if self.norm_list[c]['min'].device != x_tensor.device:
+            x_tensor = x_tensor.to(self.norm_list[c]['min'].device)
+            
+        x = (self.norm_list[c]['max'] - self.norm_list[c]['min']) * x_tensor + self.norm_list[c]['min']
         return x
     
     def z_score_normalize(self, x):
@@ -282,8 +299,31 @@ class SimpleGraphDataset(Dataset):
     
     def z_score_denormalize(self, x, c):
         """Z-score denormalization."""
-        x = x * self.norm_list[c]['std'] + self.norm_list[c]['mean']
+        if isinstance(x, np.ndarray):
+            x_tensor = torch.from_numpy(x).float()
+        else:
+            x_tensor = x.float() if not x.is_floating_point() else x
+        if self.norm_list[c]['mean'].device != x_tensor.device:
+            x_tensor = x_tensor.to(self.norm_list[c]['mean'].device)
+            
+        x = x_tensor * self.norm_list[c]['std'] + self.norm_list[c]['mean']
         return x
+    
+    def log_minmax_denormalize(self, x, c):
+        """Log-minmax denormalization."""
+        log_min = self.norm_list[c]['log_min']
+        log_max = self.norm_list[c]['log_max']
+        
+        if isinstance(x, np.ndarray):
+            x_tensor = torch.from_numpy(x).float()
+        else:
+            x_tensor = x.float() if not x.is_floating_point() else x
+        if log_min.device != x_tensor.device:
+            x_tensor = x_tensor.to(log_min.device)
+        
+        log_values = x_tensor * (log_max - log_min) + log_min
+        original_values = torch.exp(log_values) - self.epsilon
+        return original_values
     
     def _compute_normalization_params(self):
         """Compute normalization parameters using training data."""
@@ -335,6 +375,15 @@ class SimpleGraphDataset(Dataset):
                         c_std = torch.tensor(1.0)
                     self.norm_list.append({'mean': c_mean, 'std': c_std})
                     print(f'channel {c}, mean: {c_mean}, std: {c_std}')
+            elif self.norm_mode == 'log_minmax':
+                for c in range(all_features.shape[1]):
+                    log_transformed = torch.log(all_features[:, c] + self.epsilon)
+                    log_min = log_transformed.min()
+                    log_max = log_transformed.max()
+                    self.norm_list.append({'log_min': log_min, 'log_max': log_max})
+                    zeros_pct = (all_features[:, c] == 0).float().mean() * 100
+                    print(f'channel {c}, raw_min: {all_features[:, c].min()}, raw_max: {all_features[:, c].max()}, '
+                          f'zeros: {zeros_pct:.1f}%, log_min: {log_min}, log_max: {log_max}')
             
             print(f"Computed normalization parameters for {len(self.norm_list)} channels")
         except Exception as e:
@@ -455,8 +504,11 @@ class SimpleGraphDataset(Dataset):
                 county_features = pyg_graph.x_dict['county']
                 normalized_features = self.channel_wise_normalize(county_features)
                 ids = list(range(len(normalized_features)))
-                counts = normalized_features[:, 0]
-                abundances = normalized_features[:, 1]
+                if self.dataset == 'japan':
+                    counts = normalized_features[:, 0]
+                else:
+                    counts = normalized_features[:, 0]
+                    abundances = normalized_features[:, 1]
             else:
                 ids = []
                 counts = torch.tensor([])
@@ -467,12 +519,18 @@ class SimpleGraphDataset(Dataset):
             
             year_encoding, week_encoding = self.encode_temporal_info(year, week)
             target_temporal_info.append((year_encoding, week_encoding))
+            if self.dataset == 'japan':
+                time_features_list.append((counts))
+            else:
+                time_features_list.append((counts, abundances))
             
-            time_features_list.append((counts, abundances))
         
         if time_features_list:
             for t in range(len(time_features_list)):
-                counts, abundances = time_features_list[t]
-                target_values.append(torch.stack([counts, abundances], dim=-1))
-        
+                if self.dataset == 'japan':
+                    counts = time_features_list[t]
+                else:
+                    counts, abundances = time_features_list[t]
+                target_values.append(torch.stack([counts], dim=-1))
+
         return input_graphs, target_values, county_ids, (temporal_info, target_temporal_info)

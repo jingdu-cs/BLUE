@@ -952,6 +952,7 @@ class FusionGNN(nn.Module):
         bt_index = []
         county_nums = [None]*batch_size
         fusion_edges = [None]*batch_size
+        original_node_features = [None]*batch_size
 
         for t in range(seq_len):
             for b in range(batch_size):
@@ -968,16 +969,21 @@ class FusionGNN(nn.Module):
                 if t == seq_len-1:
                     county_nums[b] = fusion_feat.size(0)
                     fusion_edges[b] = fusion_hetero_edges
+                    original_node_features[b] = fusion_feat
 
         num_graphs = len(fused_graphs)
         big_batch = Batch.from_data_list(fused_graphs).to(device)
         x = big_batch.x
         edge_index = big_batch.edge_index
 
-        for conv in self.encoder_convs:
-            x = conv(x, edge_index)
+        x_original = x.clone()
+        for i, conv in enumerate(self.encoder_convs):
+            x_conv = conv(x, edge_index)
+            x = x_conv + x
             x = F.relu(x)
             x = self.dropout(x)
+            if i % 2 == 1:
+                x = x + 0.1 * x_original
 
         encoded_by_sample = [ [None]*seq_len for _ in range(batch_size) ]
         graph_id_of_node = big_batch.batch
@@ -1003,11 +1009,30 @@ class FusionGNN(nn.Module):
         for b in range(batch_size):
             seq_tensor = torch.stack(encoded_by_sample[b], dim=1)
             if self.use_transformer_temporal:
-                fused = self.temporal_integration(seq_tensor)
+                attention_mask = torch.ones(seq_tensor.shape[0], seq_tensor.shape[1], device=device)
+                fused = self.temporal_integration(seq_tensor, attention_mask)
+                
+                if original_node_features[b] is not None:
+                    orig_feat = original_node_features[b]
+                    if orig_feat.shape[0] == fused.shape[0]:
+                        fused = fused + 0.2 * orig_feat
+                
                 hidden_state = fused
             else:
-                fused, _ = self.temporal_integration(seq_tensor)
-                hidden_state = fused[:, -1, :]
+                batch_nodes = seq_tensor.shape[0]
+                hidden_outputs = []
+                for node_idx in range(batch_nodes):
+                    node_seq = seq_tensor[node_idx:node_idx+1]  
+                    node_fused, _ = self.temporal_integration(node_seq)
+                    hidden_outputs.append(node_fused[:, -1, :])
+                
+                hidden_state = torch.cat(hidden_outputs, dim=0)
+                
+                if original_node_features[b] is not None:
+                    orig_feat = original_node_features[b]
+                    if orig_feat.shape[0] == hidden_state.shape[0]:
+                        hidden_state = hidden_state + 0.2 * orig_feat
+            
             hidden_by_sample.append(hidden_state)
 
         batch_predictions = []
@@ -1016,8 +1041,18 @@ class FusionGNN(nn.Module):
             fusion_edge_dict = fusion_edges[b]
             preds = []
 
-            prev_feat = self.prediction_to_feature(
-                self.single_step_predict(hidden_state))
+            node_count = hidden_state.shape[0]
+            prev_feats = []
+            for node_idx in range(node_count):
+                node_hidden = hidden_state[node_idx:node_idx+1]  
+                node_pred = self.single_step_predict(node_hidden)
+                node_feat = self.prediction_to_feature(node_pred)
+                prev_feats.append(node_feat)
+            
+            prev_feat = torch.cat(prev_feats, dim=0)
+            
+            initial_hidden = hidden_state.clone()
+            
             for step in range(self.pred_horizon):
                 if pred_temporal_info is not None and step < len(pred_temporal_info[b]):
                     year_enc, week_enc = pred_temporal_info[b][step]
@@ -1026,14 +1061,30 @@ class FusionGNN(nn.Module):
                     step_time_info = None
 
                 decoded = self.decoder_process(hidden_state,
-                                                fusion_edge_dict,
-                                                prev_feat,
-                                                step_time_info)
-
-                step_pred = self.single_step_predict(decoded)
+                                              fusion_edge_dict,
+                                              prev_feat,
+                                              step_time_info)
+                
+                decoded = decoded + 0.15 * prev_feat + 0.1 * initial_hidden
+                
+                step_predictions = []
+                for node_idx in range(node_count):
+                    node_decoded = decoded[node_idx:node_idx+1]
+                    node_pred = self.single_step_predict(node_decoded)
+                    step_predictions.append(node_pred)
+                
+                step_pred = torch.cat(step_predictions, dim=0)
                 preds.append(step_pred)
-                prev_feat = self.prediction_to_feature(step_pred)
-                hidden_state = 0.8 * hidden_state + 0.2 * decoded
+                
+                node_prev_feats = []
+                for node_idx in range(node_count):
+                    node_pred = step_pred[node_idx:node_idx+1]
+                    node_feat = self.prediction_to_feature(node_pred)
+                    node_prev_feats.append(node_feat)
+                
+                prev_feat = torch.cat(node_prev_feats, dim=0)
+                
+                hidden_state = 0.7 * hidden_state + 0.2 * decoded + 0.1 * initial_hidden
 
             batch_predictions.append(torch.stack(preds, dim=0))
 

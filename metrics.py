@@ -31,51 +31,33 @@ def calculate_metrics(args, model, data_loader, device, dataset, pred_horizon=4,
                 )
             
             batch_outputs = model(device_graphs, device_input_temporals)
-
-            if mode == 'japan':
-                # Reshape for Japan dataset: [batch_size, pred_horizon, num_prefectures, features]
-                y_preds = torch.stack(batch_outputs, dim=0).permute(0,2,1).unsqueeze(-1)
-                col_tensors = [torch.stack(col, dim=0) for col in device_targets]
-                targets = torch.stack(col_tensors, dim=0).permute(1,0,2).unsqueeze(-1)
-
-                forecast.append(y_preds.cpu().detach().numpy())
-                groundtruth.append(targets.cpu().detach().numpy())
-            elif mode == 'avian':
-                y_preds = torch.stack(batch_outputs, dim=0)
+            y_preds = torch.stack(batch_outputs, dim=0)
+            
+            reshaped_targets = []
+            batch_size = len(device_targets[0])
+            num_time_steps = len(device_targets)
+            for batch_idx in range(batch_size):
+                batch_targets_over_time = []
+                for time_idx in range(num_time_steps):
+                    batch_targets_over_time.append(device_targets[time_idx][batch_idx])
                 
-                reshaped_targets = []
-                batch_size = len(device_targets[0])
-                num_time_steps = len(device_targets)
-                for batch_idx in range(batch_size):
-                    batch_targets_over_time = []
-                    for time_idx in range(num_time_steps):
-                        batch_targets_over_time.append(device_targets[time_idx][batch_idx])
-                    
-                    batch_tensor = torch.stack(batch_targets_over_time, dim=0) 
-                    reshaped_targets.append(batch_tensor)
-                
-                targets = torch.stack(reshaped_targets, dim=0) 
+                batch_tensor = torch.stack(batch_targets_over_time, dim=0) 
+                reshaped_targets.append(batch_tensor)
+            
+            targets = torch.stack(reshaped_targets, dim=0) 
 
-                forecast_denorm = dataset.channel_wise_denormalize(y_preds.cpu().detach().numpy(), size=0)
-                groundtruth_denorm = dataset.channel_wise_denormalize(targets.cpu().detach().numpy(), size=0)
+            forecast_denorm = dataset.channel_wise_denormalize(y_preds.cpu().detach().numpy(), size=0)
+            groundtruth_denorm = dataset.channel_wise_denormalize(targets.cpu().detach().numpy(), size=0)
 
-                forecast.append(forecast_denorm)
-                groundtruth.append(groundtruth_denorm)
-
+            forecast.append(forecast_denorm)
+            groundtruth.append(groundtruth_denorm)
                         
         forecast = np.concatenate(forecast, axis=0)
         groundtruth = np.concatenate(groundtruth, axis=0)
         
-        if mode == 'avian':
-            infection_forecast = forecast[..., 0:1] # Assuming infection is the first feature
-            infection_groundtruth = groundtruth[..., 0:1]
-        elif mode == 'japan':  
-            infection_forecast = forecast
-            infection_groundtruth = groundtruth
-            
         multistep_metrics, avg_metrics = model_evaluator.evaluate_numeric(
-            y_pred=infection_forecast, 
-            y_true=infection_groundtruth, 
+            y_pred=forecast, 
+            y_true=groundtruth, 
             mode=set
         )
-    return avg_metrics
+        return multistep_metrics, avg_metrics

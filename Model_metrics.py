@@ -1,7 +1,9 @@
 import time
 import numpy as np
 from scipy.stats import spearmanr, pearsonr
-import os   
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 def mask_data(x:np.array, H:int, W:int, mask):
@@ -35,13 +37,35 @@ def mask_data(x:np.array, H:int, W:int, mask):
 
 class ModelEvaluator(object):
     def __init__(self, params:dict, precision=4, epsilon=1e-5):
-        self.params = vars(params)
-        self.params = params
+        self.params = params if isinstance(params, dict) else vars(params)
+        
+        if not isinstance(self.params, dict):
+            raise TypeError(f"params should be a dictionary or an object convertible to a dictionary, got {type(params)}")
+
         self.precision = precision
-        self.epsilon = epsilon     
+        self.epsilon = epsilon
+
+    @staticmethod
+    def plot_value_heatmap(data_array: np.array, plot_title: str, filename_path: str, cmap: str = "viridis"):
+
+        if data_array.ndim == 1: # Reshape if 1D (e.g. [num_locations])
+            data_array = data_array.reshape(1, -1)
+        
+        plt.figure(figsize=(max(10, data_array.shape[1] // 100), max(4, data_array.shape[0] // 2))) # Adjust size
+        sns.heatmap(data_array, cmap=cmap, annot=False, cbar=True)
+        plt.title(plot_title)
+        plt.xlabel("Locations (e.g., Counties)")
+        plt.ylabel("Samples in Batch / Other Dimension")
+        
+        plot_dir = os.path.dirname(filename_path)
+        if plot_dir:
+            os.makedirs(plot_dir, exist_ok=True)
+        
+        plt.savefig(filename_path)
+        plt.close()
+        print(f"Heatmap saved to {filename_path}")
 
     def evaluate_numeric(self, y_pred: np.array, y_true: np.array, mode:str, mask:list=None):
-        self.params = vars(self.params)
         assert y_pred.shape == y_true.shape
         file_path = self.params['model_dir'] + f'/{self.params["dataset"]}-{self.params["model_type"]}-{mode}-metrics.csv'
         if not os.path.exists(file_path):
@@ -54,11 +78,20 @@ class ModelEvaluator(object):
                 cf.write(f'{param}: {self.params[param]},')
             cf.write('\n')
 
+        run_plots_dir = os.path.join(self.params['model_dir'], 'evaluation_plots', mode)
+        os.makedirs(run_plots_dir, exist_ok=True)
+
         y_pred_masked, y_true_masked = y_pred, y_true
         multistep_metrics = list()
         for step in range(self.params['pred_horizon']):
             print(f'Evaluating step {step}:')
-            step_metrics = self.one_step_eval_num(y_pred_masked[:, step,...], y_true_masked[:, step,...])
+            step_metrics = self.one_step_eval_num(
+                y_pred_masked[:, step,...], 
+                y_true_masked[:, step,...],
+                current_step_idx=step,
+                run_plots_dir=run_plots_dir,
+                mode_name=mode
+            )
             multistep_metrics.append(step_metrics)
         horizon_avg = list()
         avg_metrics = {}
@@ -83,28 +116,50 @@ class ModelEvaluator(object):
 
         return multistep_metrics, avg_metrics
 
-    def one_step_eval_num(self, y_pred_step: np.array, y_true_step: np.array):
+    def one_step_eval_num(self, y_pred_step: np.array, y_true_step: np.array, current_step_idx: int, run_plots_dir: str, mode_name: str):
         assert y_pred_step.shape == y_true_step.shape
 
         MSEs, RMSEs, MAEs, MAPEs, F1s, Pearsons = [], [], [], [], [], []
         print('y_pred_step.shape', y_pred_step.shape)
         for c in range(y_pred_step.shape[-1]):
-            y_pred_step_c = y_pred_step[...,c]
-            y_true_step_c = y_true_step[...,c]
+            if c == 0:
+                y_pred_step_c = y_pred_step[...,c]
+                y_true_step_c = y_true_step[...,c]
 
-            MSE_c = self.MSE(y_pred_step_c, y_true_step_c)
-            RMSE_c = self.RMSE(y_pred_step_c, y_true_step_c)
-            MAE_c = self.MAE(y_pred_step_c, y_true_step_c)
-            MAPE_c = self.MAPE(y_pred_step_c, y_true_step_c)
-            F1_c = self.F1_score(y_pred_step_c, y_true_step_c)
-            Pearson_c = self.pearson_corr(y_pred_step_c, y_true_step_c)
-            print(f'MSE: {MSE_c:11.4f}, RMSE: {RMSE_c:9.4f}, MAE: {MAE_c:9.4f}, MAPE: {MAPE_c:9.4%}, F1: {F1_c:9.4f}, Spearman: {Pearson_c:9.4f}')
-            MSEs.append(MSE_c)
-            RMSEs.append(RMSE_c)
-            MAEs.append(MAE_c)
-            MAPEs.append(MAPE_c)
-            F1s.append(F1_c)
-            Pearsons.append(Pearson_c)
+                if hasattr(y_pred_step_c, 'detach') and hasattr(y_pred_step_c, 'cpu') and hasattr(y_pred_step_c, 'numpy'):
+                    y_pred_numpy_c = y_pred_step_c.detach().cpu().numpy()
+                else:
+                    y_pred_numpy_c = np.asarray(y_pred_step_c)
+                
+                if hasattr(y_true_step_c, 'detach') and hasattr(y_true_step_c, 'cpu') and hasattr(y_true_step_c, 'numpy'):
+                    y_true_numpy_c = y_true_step_c.detach().cpu().numpy()
+                else:
+                    y_true_numpy_c = np.asarray(y_true_step_c)
+
+                pred_heatmap_filename = os.path.join(run_plots_dir, f"step{current_step_idx}_channel{c}_pred_heatmap.png")
+                true_heatmap_filename = os.path.join(run_plots_dir, f"step{current_step_idx}_channel{c}_true_heatmap.png")
+                
+                pred_title = f"Predicted Values Heatmap (Mode: {mode_name}, Step: {current_step_idx}, Channel: {c})"
+                true_title = f"True Values Heatmap (Mode: {mode_name}, Step: {current_step_idx}, Channel: {c})"
+
+                self.plot_value_heatmap(y_pred_numpy_c, pred_title, pred_heatmap_filename)
+                self.plot_value_heatmap(y_true_numpy_c, true_title, true_heatmap_filename)
+
+                MSE_c = self.MSE(y_pred_numpy_c, y_true_numpy_c)
+                RMSE_c = self.RMSE(y_pred_numpy_c, y_true_numpy_c)
+                MAE_c = self.MAE(y_pred_numpy_c, y_true_numpy_c)
+                MAPE_c = self.MAPE(y_pred_numpy_c, y_true_numpy_c)
+                F1_c = self.F1_score(y_pred_numpy_c, y_true_numpy_c)
+                Pearson_c = self.pearson_corr(y_pred_numpy_c, y_true_numpy_c)
+                print(f'MSE: {MSE_c:11.4f}, RMSE: {RMSE_c:9.4f}, MAE: {MAE_c:9.4f}, MAPE: {MAPE_c:9.4%}, F1: {F1_c:9.4f}, Pearson: {Pearson_c:9.4f}')
+                MSEs.append(MSE_c)
+                RMSEs.append(RMSE_c)
+                MAEs.append(MAE_c)
+                MAPEs.append(MAPE_c)
+                F1s.append(F1_c)
+                Pearsons.append(Pearson_c)
+            else:
+                continue
 
         step_metrics = dict()
         step_metrics['mse'] = np.mean(MSEs)
@@ -112,7 +167,7 @@ class ModelEvaluator(object):
         step_metrics['mae'] = np.mean(MAEs)
         step_metrics['mape'] = np.nanmean(MAPEs)
         step_metrics['f1'] = np.mean(F1s)
-        step_metrics['Pearson'] = np.mean(Pearsons)
+        step_metrics['pearson'] = np.mean(Pearsons)
         
         print('Overall: \n'
               f'   MSE: {step_metrics["mse"]:10.4f}, RMSE: {step_metrics["rmse"]:9.4f} \n'
@@ -128,6 +183,8 @@ class ModelEvaluator(object):
             y_pred = y_pred.detach().cpu().numpy()
         if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
             y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred)
+        y_true = np.asarray(y_true)
         return np.mean(np.square(y_pred - y_true))
 
     @staticmethod
@@ -136,6 +193,8 @@ class ModelEvaluator(object):
             y_pred = y_pred.detach().cpu().numpy()
         if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
             y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred)
+        y_true = np.asarray(y_true)
         return np.sqrt(np.mean(np.square(y_pred - y_true)))
 
     @staticmethod
@@ -144,6 +203,8 @@ class ModelEvaluator(object):
             y_pred = y_pred.detach().cpu().numpy()
         if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
             y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred)
+        y_true = np.asarray(y_true)
         return np.mean(np.abs(y_pred - y_true))
 
     @staticmethod
@@ -152,6 +213,8 @@ class ModelEvaluator(object):
             y_pred = y_pred.detach().cpu().numpy()
         if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
             y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred)
+        y_true = np.asarray(y_true)
         greater_than_ = y_true > 10
         y_pred, y_true = y_pred[greater_than_], y_true[greater_than_]
         return np.mean(np.abs(y_pred - y_true) / np.abs(y_true))
@@ -166,6 +229,8 @@ class ModelEvaluator(object):
             y_pred = y_pred.detach().cpu().numpy()
         if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
             y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred) # Ensure numpy array for F1 logic
+        y_true = np.asarray(y_true) # Ensure numpy array for F1 logic
         y_pred_binary = (y_pred > 0).astype(np.int32)
         y_true_binary = (y_true > 0).astype(np.int32)
         
@@ -189,6 +254,8 @@ class ModelEvaluator(object):
             y_pred = y_pred.detach().cpu().numpy()
         if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
             y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred)
+        y_true = np.asarray(y_true)
         y_pred_flat = y_pred.flatten()
         y_true_flat = y_true.flatten()
         

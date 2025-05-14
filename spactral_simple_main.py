@@ -15,8 +15,58 @@ import numpy as np
 from sklearn.model_selection import KFold
 import pandas as pd
 import torch.linalg
+import math
+import scipy.linalg
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# 添加自定义Focal Loss实现
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.eps = 1e-7  # 防止数值不稳定
+        
+    def forward(self, input, target):
+        # 计算L1损失
+        l1_loss = torch.abs(input - target)
+        
+        # 计算focal权重：越难预测的样本（误差大的）权重越高
+        pt = torch.exp(-l1_loss)  # 将误差转换为概率形式
+        focal_weight = (1 - pt) ** self.gamma
+        
+        # 应用focal权重
+        loss = self.alpha * focal_weight * l1_loss
+        
+        # 根据reduction参数返回结果
+        if self.reduction == 'none':
+            return loss
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:  # mean
+            return loss.mean()
+
+# 加权L1损失，增强稀疏/罕见事件的权重
+class WeightedL1Loss(nn.Module):
+    def __init__(self, pos_weight=10.0, threshold=1.0):
+        super(WeightedL1Loss, self).__init__()
+        self.pos_weight = pos_weight  # 正样本权重
+        self.threshold = threshold  # 区分正负样本的阈值
+        
+    def forward(self, input, target):
+        l1_loss = torch.abs(input - target)
+        
+        # 创建权重矩阵：大于阈值的为正样本，使用更高的权重
+        weights = torch.ones_like(target)
+        weights[target > self.threshold] = self.pos_weight
+        
+        # 应用权重
+        weighted_loss = weights * l1_loss
+        
+        return weighted_loss.mean()
 
 
 def compute_county_spatial_laplacian(x_dict, edge_index_dict, device):
@@ -431,6 +481,8 @@ def evaluate(model, val_loader, criterion, device, dataset, writer=None, epoch=N
                                 if feature_idx < len(dataset.norm_list):
                                     if dataset.norm_mode == 'z_score':
                                         target_device = dataset.norm_list[feature_idx]['mean'].device
+                                    elif dataset.norm_mode == 'log_minmax':
+                                        target_device = dataset.norm_list[feature_idx]['log_min'].device
                                     else:
                                         target_device = dataset.norm_list[feature_idx]['min'].device
                                     
@@ -440,6 +492,8 @@ def evaluate(model, val_loader, criterion, device, dataset, writer=None, epoch=N
                                         denorm_feature = dataset.minmax_denormalize(feature_data, feature_idx)
                                     elif dataset.norm_mode == 'z_score':
                                         denorm_feature = dataset.z_score_denormalize(feature_data, feature_idx)
+                                    elif dataset.norm_mode == 'log_minmax':
+                                        denorm_feature = dataset.log_minmax_denormalize(feature_data, feature_idx)
                                     
                                     if num_features > 1:
                                         denorm_outputs_t[:, feature_idx] = denorm_feature
@@ -481,9 +535,9 @@ def main():
     parser.add_argument('--data_dir', type=str, default='/scratch/hn98/jd2651/processed_graphs',
                         help='Directory containing graph pickle files, for japan, it is /scratch/hn98/jd2651/processed_graphs, for avian, it is /scratch/hn98/jd2651/30_processed_graphs')
     parser.add_argument('--batch_size', type=int, default=2, help='Batch size for training')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
-    parser.add_argument('--hidden_dim', type=int, default=16, help='Hidden dimension size')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--lr', type=float, default=0.00001, help='Learning rate')
+    parser.add_argument('--hidden_dim', type=int, default=8, help='Hidden dimension size')
     parser.add_argument('--num_mrf', type=int, default=1, help='Iteration of MRF correction')
     parser.add_argument('--window_size', type=int, default=5, help='Input window size (weeks)')
     parser.add_argument('--pred_horizon', type=int, default=3, help='Prediction horizon (weeks)')
@@ -515,13 +569,18 @@ def main():
                         help='Ratio of data to use for testing (used only if use_kfold=False)')
     parser.add_argument('--use_cuda', type=str, default='cuda',
                         help='Use CUDA for training')
-
+    parser.add_argument('--device', type=int, default=1, 
+                        help='Device to use for training')
+    parser.add_argument('--weight_decay', type=float, default=0.0001, 
+                    help='Weight decay (L2 penalty) for optimizer')
     args = parser.parse_args()
 
     os.makedirs(args.model_dir, exist_ok=True)
 
-    args.device = torch.device(args.use_cuda if torch.cuda.is_available() else 'cpu')
-    logger.info(f"Using device: {args.device}")
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
+    device = torch.device(args.use_cuda if torch.cuda.is_available() else 'cpu')
+
+    logger.info(f"Using device: {device}")
 
     logger.info("Creating datasets...")
 
@@ -529,7 +588,8 @@ def main():
         graphs_dir=args.data_dir,
         window_size=args.window_size,
         prediction_horizon=args.pred_horizon,
-        dataset=args.dataset
+        dataset=args.dataset,
+        norm_mode='z_score'
     )
     logger.info(f"Full dataset size: {len(full_dataset)}")
     if len(full_dataset) == 0:
@@ -566,7 +626,7 @@ def main():
                 batch_size=args.batch_size,
                 shuffle=True,
                 collate_fn=collate_fn,
-                num_workers=1
+                num_workers=0
             )
 
             val_dataset = torch.utils.data.Subset(full_dataset, val_idx)
@@ -575,7 +635,7 @@ def main():
                 batch_size=args.batch_size,
                 shuffle=False,
                 collate_fn=collate_fn,
-                num_workers=1
+                num_workers=0
             )
 
             test_dataset = torch.utils.data.Subset(full_dataset, test_idx)
@@ -584,7 +644,7 @@ def main():
                 batch_size=args.batch_size,
                 shuffle=False,
                 collate_fn=collate_fn,
-                num_workers=1
+                num_workers=0
             )
 
             logger.info(f"Creating model for fold {fold + 1}...")
@@ -604,15 +664,11 @@ def main():
                 logger.warning("Could not detect county input dimension, using default: 1")
 
             if args.model_type == 'FusionGNN':
-                if args.dataset == 'japan':
-                    channel = 1
-                else:
-                    channel = 2
-                # print('channel', channel)
+                channel = 1
                 model = FusionGNN(
                     channel=channel,
                     hidden_dim=args.hidden_dim,
-                    num_layers=2,
+                    num_layers=1,
                     dropout=args.dropout,
                     pred_horizon=args.pred_horizon,
                     link_threshold=args.link_threshold,
@@ -625,22 +681,30 @@ def main():
             else:  # Default to FullHeteroGNN
                 model = FullHeteroGNN(
                     hidden_dim=args.hidden_dim,
-                    num_layers=2,
+                    num_layers=1,
                     dropout=args.dropout,
                     pred_horizon=args.pred_horizon,
                     num_mrf=args.num_mrf,
                     device=args.device
                 ).to(args.device)
 
-            optimizer = optim.Adam(model.parameters(), lr=args.lr)
+            optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            # 替换原有的MSELoss为自定义的FocalLoss
             criterion = nn.MSELoss()
+            # criterion = FocalLoss(alpha=1.0, gamma=2.0)
+            # 或者使用加权L1Loss:
+            # criterion = WeightedL1Loss(pos_weight=10.0, threshold=1.0)
 
             logger.info(f"Starting training for fold {fold + 1}...")
             best_mse = float('inf')
             best_f1 = 0.0
             best_mae = float('inf')
             best_model_state = None
-
+            
+            # Early stopping parameters
+            patience = 10
+            counter = 0
+            
             for epoch in range(args.epochs):
                 train_pred_loss, _ = train(
                     model, train_loader, optimizer, criterion, args.device, full_dataset,
@@ -673,6 +737,9 @@ def main():
                         best_f1 = avg_val_metrics['f1']
                         best_mae = avg_val_metrics['mae']
                         best_model_state = model.state_dict().copy()
+                        
+                        # Reset early stopping counter since we improved
+                        counter = 0
 
                         save_path = os.path.join(args.model_dir, f'best_model_fold{fold + 1}.pt')
                         torch.save({
@@ -688,6 +755,14 @@ def main():
                         logger.info(f"Saved new best model for fold {fold + 1} to {save_path} with MSE: {best_mse:.4f}")
                     else:
                         print('not save best model on validation MSE for this fold')
+                        # Increment early stopping counter
+                        counter += 1
+                        logger.info(f"Early stopping counter: {counter}/{patience}")
+                        
+                        # Check if we should stop training
+                        if counter >= patience:
+                            logger.info(f"Early stopping triggered after {epoch + 1} epochs for fold {fold + 1}")
+                            break
 
             if best_model_state is not None:
                 model.load_state_dict(best_model_state)
