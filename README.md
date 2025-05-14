@@ -85,3 +85,6 @@ The following metrics are computed (see `metrics.py`):
 * **Pearson** - Pearson correlations
 * **F1 Score** - F1 Score
 
+We adapted parts of the implementation (data split and evaluation metrics) from the open-source GitHub repository [EAST-Net] ([https://github.com/username/repo-name](https://github.com/underdoc-wang/EAST-Net/tree/main)), modifying it to fit the specific requirements of our study.
+
+
