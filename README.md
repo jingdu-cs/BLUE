@@ -34,7 +34,7 @@ $ pip install -r requirements.txt  # numpy, pandas, scikit‑learn, tqdm, tensor
 
 ## 📄 Dataset preparation
 
-FusionGNN expects **weekly graphs** that already combine all raw data into PyG `HeteroData` pickle files
+BLUE expects **weekly graphs** that already combine all raw data into PyG `HeteroData` pickle files
 Each file **must** contain:
 
 * Node types: `"county"`, `"case"`
