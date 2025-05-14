@@ -12,7 +12,7 @@ Accurate forecasting of avian influenza outbreaks within wild bird populations r
 ├── simple_graph_dataset.py # Windowed time‑series dataset loader
 ├── metrics.py              # Prediction process
 ├── Model_metrics.py        # MAE / RMSE / PCC /F1 Score evaluation metrics
-├── spactral_simple_main.py # Train / Val / Eval entry‑point
+├── spectral_simple_main.py # Train / Val / Eval entry‑point
 └── requirements.txt        # environments
 ```
 
@@ -48,17 +48,17 @@ Each file **must** contain:
 ## 🚀 Quick start
 
 ```bash
-python spactral_simple_main.py \
-  --dataset avian \
-  --data_dir ./processed_graphs \
-  --model_type full \
+python spectral_simple_main.py \
+  --dataset 'avian' \
+  --data_dir './processed_graphs' \
+  --model_type 'FusionGNN' \
   --window_size 4 \
   --pred_horizon 4 \
-  --hidden_dim 16 \
+  --hidden_dim 8 \
   --epochs 100 \
-  --batch_size 4 \
+  --batch_size 8 \
   --lr 1e-5 \
-  --num_mrf 3 \
+  --num_mrf 1 \
   --spectral_gamma 0.1
 ```
 
@@ -66,10 +66,10 @@ python spactral_simple_main.py \
 | ---------------- | --------------------------------- | ------- |
 | --window_size    | $w$ historic weeks fed to encoder | 4       |
 | --pred_horizon   | $h$ weeks to forecast             | 4       |
-| --num_mrf        | MRF smoothing layers              | 3       |
+| --num_mrf        | MRF smoothing layers              | 1       |
 | --spectral_gamma | weight of spectral approximation  | 0.1     |
 
-`spactral_simple_main.py --help` prints the full list.
+`spectral_simple_main.py --help` prints the full list.
 
 During training the script will output fold‑wise **MAE / RMSE / MAPE / F1 / Pearson** and save the best model to `./save_results/`.
 
