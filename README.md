@@ -21,8 +21,6 @@ Accurate forecasting of avian influenza outbreaks within wild bird populations r
 
 ```bash
 # 1. Clone the repo
-$ git clone https://github.com/<your‑handle>/FusionGNN.git
-$ cd FusionGNN
 
 # 2. Create environment (CUDA 11.8 example)
 $ conda create -n fusiongnn python=3.10
