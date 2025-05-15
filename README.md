@@ -40,7 +40,8 @@ Each file **must** contain:
 * Node types: `"county"`, `"case"`
 * Edge types: `(county, spatial, county)`, `(case, genetic, case)`, `(case, assignment, county)`
 * Node feature tensors named `x`
-* A node‑level infection count attribute `count` (target to predict)
+* County‑level attributes [`infected count`, 'abundance']
+* Case-level attributes ['importance']
 
 
 ## 🚀 Quick start
@@ -48,7 +49,7 @@ Each file **must** contain:
 ```bash
 python spectral_simple_main.py \
   --dataset 'avian' \
-  --data_dir './processed_graphs' \
+  --data_dir './sampled_processed_graphs' \
   --model_type 'FusionGNN' \
   --window_size 4 \
   --pred_horizon 4 \
@@ -69,7 +70,7 @@ python spectral_simple_main.py \
 
 `spectral_simple_main.py --help` prints the full list.
 
-During training the script will output fold‑wise **MAE / RMSE / MAPE / F1 / Pearson** and save the best model to `./save_results/`.
+During training the script will output fold‑wise **MAE / RMSE / F1 / Pearson** and save the best model to `./save_results/`.
 
 ---
 
@@ -79,7 +80,6 @@ The following metrics are computed (see `metrics.py`):
 
 * **MAE** – Mean Absolute Error
 * **RMSE** – Root Mean Squared Error
-* **MAPE** – Mean Absolute Percentage Error
 * **Pearson** - Pearson correlations
 * **F1 Score** - F1 Score
 
