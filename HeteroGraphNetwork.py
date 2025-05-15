@@ -148,7 +148,7 @@ class TransformerGateNetwork(nn.Module):
 
 
 class TransformerTemporalFusion(nn.Module):
-    def __init__(self, hidden_dim, num_heads=4, num_layers=2, dropout=0.1, max_len=10):
+    def __init__(self, hidden_dim, num_heads=4, num_layers=2, dropout=0.1, max_len=20):
         super(TransformerTemporalFusion, self).__init__()
         self.hidden_dim = hidden_dim
         self.max_len = max_len
@@ -800,7 +800,7 @@ class FusionGNN(nn.Module):
                 num_heads=transformer_heads,
                 num_layers=transformer_layers,
                 dropout=dropout,
-                max_len=10
+                max_len=20
             ).to(self.device)
         else:
             self.temporal_integration = nn.GRU(hidden_dim, hidden_dim, batch_first=True).to(self.device)

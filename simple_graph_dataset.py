@@ -13,7 +13,7 @@ class SimpleGraphDataset(Dataset):
     Simple dataset that loads preprocessed PyG graphs.
     """
     
-    def __init__(self, graphs_dir='processed_graphs', window_size=4, prediction_horizon=4, train_ratio=0.8, norm_mode='minmax', dataset='avian'):
+    def __init__(self, graphs_dir='processed_graphs', window_size=4, prediction_horizon=4, train_ratio=0.8, norm_mode='z_score', dataset='avian'):
         """
         Initialize the dataset.
         
@@ -22,7 +22,7 @@ class SimpleGraphDataset(Dataset):
             window_size: Number of consecutive weeks to use as input
             prediction_horizon: Number of weeks to predict
             train_ratio: Ratio of data to use for training
-            norm_mode: Normalization mode, 'minmax', 'z_score', or 'log_minmax'
+            norm_mode: Normalization mode, 'minmax', 'z_score', 'log_minmax', or 'log_plus_one'
             dataset: Dataset type, 'avian' or 'japan'
         """
         self.graphs_dir = graphs_dir
@@ -236,12 +236,13 @@ class SimpleGraphDataset(Dataset):
             elif self.norm_mode == 'log_minmax':
                 log_min = self.norm_list[c]['log_min']
                 log_max = self.norm_list[c]['log_max']
-                # 应用log变换
                 log_transformed = torch.log(x[..., c] + self.epsilon)
-                # 应用min-max归一化
                 denominator = log_max - log_min
                 denominator = torch.where(denominator == 0, torch.ones_like(denominator), denominator)
                 flow_c = (log_transformed - log_min) / denominator
+                x_norm.append(flow_c)
+            elif self.norm_mode == 'log_plus_one':
+                flow_c = torch.log(x[..., c] + 1.0)
                 x_norm.append(flow_c)
             else:
                 raise ValueError(f"Unsupported normalization mode: {self.norm_mode}")
@@ -259,22 +260,17 @@ class SimpleGraphDataset(Dataset):
                 y_denorm.append(self.z_score_denormalize(y[..., c], c))
             elif self.norm_mode == 'log_minmax':
                 y_denorm.append(self.log_minmax_denormalize(y[..., c], c))
+            elif self.norm_mode == 'log_plus_one':
+                y_denorm.append(self.log_plus_one_denormalize(y[..., c], c))
             else:
                 raise ValueError(f"Unsupported normalization mode: {self.norm_mode}")
         y_denorm = torch.stack(y_denorm, dim=-1)
         return y_denorm
     
     def minmax_normalize(self, x):
-        """Min-max normalization to [0, 1]."""
-        # x_max = x.max()
-        # x_min = x.min()
-        # denominator = x_max - x_min
-        # denominator = torch.where(denominator == 0, torch.ones_like(denominator), denominator)
-        # x = (x - x_min) / denominator
-        # return x, x_min, x_max
+        """Min-max normalization to [0, 1]."""  
         x_max, x_min = x.max(), x.min()
         x = (x - x_min) / (x_max - x_min)
-        #x = x * 2 - 1
         return x, x_min, x_max
     
     def minmax_denormalize(self, x, c):
@@ -323,6 +319,26 @@ class SimpleGraphDataset(Dataset):
         
         log_values = x_tensor * (log_max - log_min) + log_min
         original_values = torch.exp(log_values) - self.epsilon
+        return original_values
+    
+    def log_plus_one_denormalize(self, x, c):
+        """
+        Apply inverse of log(y+1) transformation: exp(x) - 1
+        
+        Args:
+            x: Normalized values
+            c: Channel index
+        
+        Returns:
+            Original values
+        """
+        if isinstance(x, np.ndarray):
+            x_tensor = torch.from_numpy(x).float()
+        else:
+            x_tensor = x.float() if not x.is_floating_point() else x
+        
+        # Apply exp(x) - 1 to get original values
+        original_values = torch.exp(x_tensor) - 1.0
         return original_values
     
     def _compute_normalization_params(self):
@@ -384,6 +400,12 @@ class SimpleGraphDataset(Dataset):
                     zeros_pct = (all_features[:, c] == 0).float().mean() * 100
                     print(f'channel {c}, raw_min: {all_features[:, c].min()}, raw_max: {all_features[:, c].max()}, '
                           f'zeros: {zeros_pct:.1f}%, log_min: {log_min}, log_max: {log_max}')
+            elif self.norm_mode == 'log_plus_one':
+                for c in range(all_features.shape[1]):
+                    self.norm_list.append({})
+                    zeros_pct = (all_features[:, c] == 0).float().mean() * 100
+                    print(f'channel {c}, raw_min: {all_features[:, c].min()}, raw_max: {all_features[:, c].max()}, '
+                          f'zeros: {zeros_pct:.1f}%, using log(y+1) transform')
             
             print(f"Computed normalization parameters for {len(self.norm_list)} channels")
         except Exception as e:

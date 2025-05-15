@@ -21,49 +21,40 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# 添加自定义Focal Loss实现
 class FocalLoss(nn.Module):
     def __init__(self, alpha=1, gamma=2, reduction='mean'):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
-        self.eps = 1e-7  # 防止数值不稳定
+        self.eps = 1e-7
         
     def forward(self, input, target):
-        # 计算L1损失
         l1_loss = torch.abs(input - target)
         
-        # 计算focal权重：越难预测的样本（误差大的）权重越高
-        pt = torch.exp(-l1_loss)  # 将误差转换为概率形式
+        pt = torch.exp(-l1_loss)
         focal_weight = (1 - pt) ** self.gamma
         
-        # 应用focal权重
         loss = self.alpha * focal_weight * l1_loss
-        
-        # 根据reduction参数返回结果
         if self.reduction == 'none':
             return loss
         elif self.reduction == 'sum':
             return loss.sum()
-        else:  # mean
+        else:
             return loss.mean()
 
-# 加权L1损失，增强稀疏/罕见事件的权重
 class WeightedL1Loss(nn.Module):
     def __init__(self, pos_weight=10.0, threshold=1.0):
         super(WeightedL1Loss, self).__init__()
-        self.pos_weight = pos_weight  # 正样本权重
-        self.threshold = threshold  # 区分正负样本的阈值
+        self.pos_weight = pos_weight
+        self.threshold = threshold
         
     def forward(self, input, target):
         l1_loss = torch.abs(input - target)
         
-        # 创建权重矩阵：大于阈值的为正样本，使用更高的权重
         weights = torch.ones_like(target)
         weights[target > self.threshold] = self.pos_weight
         
-        # 应用权重
         weighted_loss = weights * l1_loss
         
         return weighted_loss.mean()
@@ -494,6 +485,8 @@ def evaluate(model, val_loader, criterion, device, dataset, writer=None, epoch=N
                                         denorm_feature = dataset.z_score_denormalize(feature_data, feature_idx)
                                     elif dataset.norm_mode == 'log_minmax':
                                         denorm_feature = dataset.log_minmax_denormalize(feature_data, feature_idx)
+                                    elif dataset.norm_mode == 'log_plus_one':
+                                        denorm_feature = dataset.log_plus_one_denormalize(feature_data, feature_idx)
                                     
                                     if num_features > 1:
                                         denorm_outputs_t[:, feature_idx] = denorm_feature
@@ -541,7 +534,7 @@ def main():
     parser.add_argument('--num_mrf', type=int, default=1, help='Iteration of MRF correction')
     parser.add_argument('--window_size', type=int, default=5, help='Input window size (weeks)')
     parser.add_argument('--pred_horizon', type=int, default=3, help='Prediction horizon (weeks)')
-    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate')
+    parser.add_argument('--dropout', type=float, default=0.5, help='Dropout rate')
     parser.add_argument('--spectral_gamma', type=float, default=0.0,
                         help='Weight for the spectral regularization loss (default: 0.0, disabled)')
     parser.add_argument('--spectral_k', type=int, default=10,
@@ -573,6 +566,9 @@ def main():
                         help='Device to use for training')
     parser.add_argument('--weight_decay', type=float, default=0.0001, 
                     help='Weight decay (L2 penalty) for optimizer')
+    parser.add_argument('--norm_mode', type=str, default='log_plus_one',
+                        choices=['minmax', 'z_score', 'log_minmax', 'log_plus_one'],
+                        help='Normalization mode for dataset')
     args = parser.parse_args()
 
     os.makedirs(args.model_dir, exist_ok=True)
@@ -589,7 +585,7 @@ def main():
         window_size=args.window_size,
         prediction_horizon=args.pred_horizon,
         dataset=args.dataset,
-        norm_mode='z_score'
+        norm_mode=args.norm_mode
     )
     logger.info(f"Full dataset size: {len(full_dataset)}")
     if len(full_dataset) == 0:
@@ -605,35 +601,19 @@ def main():
         dataset_indices = list(range(len(full_dataset)))
         all_fold_metrics = []
 
-        for fold, (train_val_idx, test_idx) in enumerate(kf.split(dataset_indices)):
+        for fold, (train_idx, test_idx) in enumerate(kf.split(dataset_indices)):
             logger.info(f"Starting fold {fold + 1}/{args.num_folds}")
-            if len(train_val_idx) < 2:
+            if len(train_idx) < 2:
                 logger.warning(f"Fold {fold + 1} has insufficient data for train/val split. Skipping fold.")
                 continue
-            train_ratio_within_fold = 0.8
-            train_size = int(len(train_val_idx) * train_ratio_within_fold)
-            if train_size == 0: train_size = 1
-            if train_size == len(train_val_idx): train_size -= 1
 
-            train_idx = train_val_idx[:train_size]
-            val_idx = train_val_idx[train_size:]
-
-            logger.info(f"Fold {fold + 1} split: Train={len(train_idx)}, Val={len(val_idx)}, Test={len(test_idx)}")
+            logger.info(f"Fold {fold + 1} split: Train={len(train_idx)}, Test={len(test_idx)}")
 
             train_dataset = torch.utils.data.Subset(full_dataset, train_idx)
             train_loader = DataLoader(
                 train_dataset,
                 batch_size=args.batch_size,
                 shuffle=True,
-                collate_fn=collate_fn,
-                num_workers=0
-            )
-
-            val_dataset = torch.utils.data.Subset(full_dataset, val_idx)
-            val_loader = DataLoader(
-                val_dataset,
-                batch_size=args.batch_size,
-                shuffle=False,
                 collate_fn=collate_fn,
                 num_workers=0
             )
@@ -689,10 +669,8 @@ def main():
                 ).to(args.device)
 
             optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-            # 替换原有的MSELoss为自定义的FocalLoss
             criterion = nn.MSELoss()
             # criterion = FocalLoss(alpha=1.0, gamma=2.0)
-            # 或者使用加权L1Loss:
             # criterion = WeightedL1Loss(pos_weight=10.0, threshold=1.0)
 
             logger.info(f"Starting training for fold {fold + 1}...")
@@ -720,22 +698,11 @@ def main():
                     logger.info(
                         f"Avg Train Metrics - MSE: {avg_train_metrics['mse']:.4f}, MAE: {avg_train_metrics['mae']:.4f}, F1: {avg_train_metrics['f1']:.4f}")
 
-                val_loss, _ = evaluate(model, val_loader, criterion, args.device, full_dataset,
-                                       writer=None, epoch=epoch, fold=fold + 1)
-                multistep_val_metrics, avg_val_metrics = calculate_metrics(args,
-                                                model, val_loader, args.device, full_dataset,
-                                                pred_horizon=args.pred_horizon, mode=args.dataset, set='val')
-
-                logger.info(f"Fold {fold + 1}, Epoch {epoch + 1}/{args.epochs} - Val Loss: {val_loss:.4f}")
-                if avg_val_metrics:
-                    logger.info(
-                        f"Avg Val Metrics - MSE: {avg_val_metrics['mse']:.4f}, MAE: {avg_val_metrics['mae']:.4f}, F1: {avg_val_metrics['f1']:.4f}")
-
-                    if avg_val_metrics['mse'] < best_mse:
-                        print('save best model on validation MSE for this fold')
-                        best_mse = avg_val_metrics['mse']
-                        best_f1 = avg_val_metrics['f1']
-                        best_mae = avg_val_metrics['mae']
+                    if avg_train_metrics['mae'] < best_mae:
+                        print('save best model on validation MAE for this fold')
+                        best_mse = avg_train_metrics['mse']
+                        best_f1 = avg_train_metrics['f1']
+                        best_mae = avg_train_metrics['mae']
                         best_model_state = model.state_dict().copy()
                         
                         # Reset early stopping counter since we improved
@@ -745,16 +712,16 @@ def main():
                         torch.save({
                             'epoch': epoch,
                             'model_state_dict': best_model_state,
-                            'val_metrics': avg_val_metrics,
+                            'train_metrics': avg_train_metrics,
                             'best_mse': best_mse,
                             'best_f1': best_f1,
                             'best_mae': best_mae,
                             'args': vars(args)
                         }, save_path)
 
-                        logger.info(f"Saved new best model for fold {fold + 1} to {save_path} with MSE: {best_mse:.4f}")
+                        logger.info(f"Saved new best model for fold {fold + 1} to {save_path} with MAE: {best_mae:.4f}")
                     else:
-                        print('not save best model on validation MSE for this fold')
+                        print('not save best model on validation MAE for this fold')
                         # Increment early stopping counter
                         counter += 1
                         logger.info(f"Early stopping counter: {counter}/{patience}")
