@@ -136,26 +136,15 @@ class ModelEvaluator(object):
                 else:
                     y_true_numpy_c = np.asarray(y_true_step_c)
 
-                pred_heatmap_filename = os.path.join(run_plots_dir, f"step{current_step_idx}_channel{c}_pred_heatmap.png")
-                true_heatmap_filename = os.path.join(run_plots_dir, f"step{current_step_idx}_channel{c}_true_heatmap.png")
-                
-                pred_title = f"Predicted Values Heatmap (Mode: {mode_name}, Step: {current_step_idx}, Channel: {c})"
-                true_title = f"True Values Heatmap (Mode: {mode_name}, Step: {current_step_idx}, Channel: {c})"
-
-                self.plot_value_heatmap(y_pred_numpy_c, pred_title, pred_heatmap_filename)
-                self.plot_value_heatmap(y_true_numpy_c, true_title, true_heatmap_filename)
-
                 MSE_c = self.MSE(y_pred_numpy_c, y_true_numpy_c)
                 RMSE_c = self.RMSE(y_pred_numpy_c, y_true_numpy_c)
                 MAE_c = self.MAE(y_pred_numpy_c, y_true_numpy_c)
-                MAPE_c = self.MAPE(y_pred_numpy_c, y_true_numpy_c)
                 F1_c = self.F1_score(y_pred_numpy_c, y_true_numpy_c)
                 Pearson_c = self.pearson_corr(y_pred_numpy_c, y_true_numpy_c)
-                print(f'MSE: {MSE_c:11.4f}, RMSE: {RMSE_c:9.4f}, MAE: {MAE_c:9.4f}, MAPE: {MAPE_c:9.4%}, F1: {F1_c:9.4f}, Pearson: {Pearson_c:9.4f}')
+                print(f'MSE: {MSE_c:11.4f}, RMSE: {RMSE_c:9.4f}, MAE: {MAE_c:9.4f}, F1: {F1_c:9.4f}, Pearson: {Pearson_c:9.4f}')
                 MSEs.append(MSE_c)
                 RMSEs.append(RMSE_c)
                 MAEs.append(MAE_c)
-                MAPEs.append(MAPE_c)
                 F1s.append(F1_c)
                 Pearsons.append(Pearson_c)
             else:
@@ -165,14 +154,13 @@ class ModelEvaluator(object):
         step_metrics['mse'] = np.mean(MSEs)
         step_metrics['rmse'] = np.mean(RMSEs)
         step_metrics['mae'] = np.mean(MAEs)
-        step_metrics['mape'] = np.nanmean(MAPEs)
         step_metrics['f1'] = np.mean(F1s)
         step_metrics['pearson'] = np.mean(Pearsons)
         
         print('Overall: \n'
               f'   MSE: {step_metrics["mse"]:10.4f}, RMSE: {step_metrics["rmse"]:9.4f} \n'
-              f'   MAE: {step_metrics["mae"]:10.4f}, MAPE: {step_metrics["mape"]:9.4%} \n'
-              f'   F1: {step_metrics["f1"]:10.4f}, Pearson: {step_metrics["pearson"]:9.4f} \n')
+              f'   MAE: {step_metrics["mae"]:10.4f}, F1: {step_metrics["f1"]:10.4f} \n'
+              f'   Pearson: {step_metrics["pearson"]:9.4f} \n')
         
         return step_metrics
 
@@ -206,18 +194,6 @@ class ModelEvaluator(object):
         y_pred = np.asarray(y_pred)
         y_true = np.asarray(y_true)
         return np.mean(np.abs(y_pred - y_true))
-
-    @staticmethod
-    def MAPE(y_pred: np.array, y_true: np.array):
-        if hasattr(y_pred, 'detach') and hasattr(y_pred, 'cpu') and hasattr(y_pred, 'numpy'):
-            y_pred = y_pred.detach().cpu().numpy()
-        if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
-            y_true = y_true.detach().cpu().numpy()
-        y_pred = np.asarray(y_pred)
-        y_true = np.asarray(y_true)
-        greater_than_ = y_true > 10
-        y_pred, y_true = y_pred[greater_than_], y_true[greater_than_]
-        return np.mean(np.abs(y_pred - y_true) / np.abs(y_true))
 
     @staticmethod
     def F1_score(y_pred: np.array, y_true: np.array):
