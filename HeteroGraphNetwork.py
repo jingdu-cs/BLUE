@@ -739,7 +739,7 @@ class FusionGNN(nn.Module):
     def __init__(self, channel=2, hidden_dim=64, num_layers=2, dropout=0.3, pred_horizon=4,
                  link_threshold=0.5, use_top_k=False, top_k=10, num_mrf=3, device=None,
                  use_transformer_temporal=True, transformer_heads=4, transformer_layers=2,
-                 county_input_dim=None):
+                 county_input_dim=None, previous_weight=0.3):
         super(FusionGNN, self).__init__()
         
         self.hidden_dim = hidden_dim
@@ -748,7 +748,7 @@ class FusionGNN(nn.Module):
         self.num_layers = num_layers
         self.device = device
         self.use_transformer_temporal = use_transformer_temporal
-        
+        self.previous_weight = previous_weight
         self.node_types = ['county', 'case']
         self.edge_types = [
             ('county', 'spatial', 'county'),
@@ -1065,7 +1065,7 @@ class FusionGNN(nn.Module):
                                               prev_feat,
                                               step_time_info)
                 
-                decoded = decoded + 0.15 * prev_feat + 0.1 * initial_hidden
+                decoded = (1 - self.previous_weight) * decoded + self.previous_weight * prev_feat + 0.3 * initial_hidden
                 
                 step_predictions = []
                 for node_idx in range(node_count):
