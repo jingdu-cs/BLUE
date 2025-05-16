@@ -1065,7 +1065,7 @@ class FusionGNN(nn.Module):
                                               prev_feat,
                                               step_time_info)
                 
-                decoded = (1 - self.previous_weight) * decoded + self.previous_weight * prev_feat + 0.3 * initial_hidden
+                decoded = (1 - self.previous_weight - 0.3) * decoded + self.previous_weight * prev_feat + 0.3 * initial_hidden
                 
                 step_predictions = []
                 for node_idx in range(node_count):
