@@ -21,40 +21,49 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# 添加自定义Focal Loss实现
 class FocalLoss(nn.Module):
     def __init__(self, alpha=1, gamma=2, reduction='mean'):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
-        self.eps = 1e-7
+        self.eps = 1e-7  # 防止数值不稳定
         
     def forward(self, input, target):
+        # 计算L1损失
         l1_loss = torch.abs(input - target)
         
-        pt = torch.exp(-l1_loss)
+        # 计算focal权重：越难预测的样本（误差大的）权重越高
+        pt = torch.exp(-l1_loss)  # 将误差转换为概率形式
         focal_weight = (1 - pt) ** self.gamma
         
+        # 应用focal权重
         loss = self.alpha * focal_weight * l1_loss
+        
+        # 根据reduction参数返回结果
         if self.reduction == 'none':
             return loss
         elif self.reduction == 'sum':
             return loss.sum()
-        else:
+        else:  # mean
             return loss.mean()
 
+# 加权L1损失，增强稀疏/罕见事件的权重
 class WeightedL1Loss(nn.Module):
     def __init__(self, pos_weight=10.0, threshold=1.0):
         super(WeightedL1Loss, self).__init__()
-        self.pos_weight = pos_weight
-        self.threshold = threshold
+        self.pos_weight = pos_weight  # 正样本权重
+        self.threshold = threshold  # 区分正负样本的阈值
         
     def forward(self, input, target):
         l1_loss = torch.abs(input - target)
         
+        # 创建权重矩阵：大于阈值的为正样本，使用更高的权重
         weights = torch.ones_like(target)
         weights[target > self.threshold] = self.pos_weight
         
+        # 应用权重
         weighted_loss = weights * l1_loss
         
         return weighted_loss.mean()
@@ -569,6 +578,8 @@ def main():
     parser.add_argument('--norm_mode', type=str, default='log_plus_one',
                         choices=['minmax', 'z_score', 'log_minmax', 'log_plus_one'],
                         help='Normalization mode for dataset')
+    parser.add_argument('--previous_weight', type=float, default=0.3,
+                        help='Previous weight for the model')
     args = parser.parse_args()
 
     os.makedirs(args.model_dir, exist_ok=True)
@@ -656,7 +667,8 @@ def main():
                     top_k=args.top_k,
                     num_mrf=args.num_mrf,
                     device=args.device,
-                    county_input_dim=county_input_dim  # Pass the detected dimension
+                    county_input_dim=county_input_dim,
+                    previous_weight=args.previous_weight
                 ).to(args.device)
             else:  # Default to FullHeteroGNN
                 model = FullHeteroGNN(
@@ -669,8 +681,14 @@ def main():
                 ).to(args.device)
 
             optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-            criterion = nn.MSELoss()
+            # 替换原有的MSELoss为自定义的FocalLoss
+            if args.dataset == 'avian':
+                criterion = nn.MSELoss()
+            else:
+                criterion = nn.MSELoss()
+            # criterion = nn.MSELoss()
             # criterion = FocalLoss(alpha=1.0, gamma=2.0)
+            # 或者使用加权L1Loss:
             # criterion = WeightedL1Loss(pos_weight=10.0, threshold=1.0)
 
             logger.info(f"Starting training for fold {fold + 1}...")
