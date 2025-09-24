@@ -246,8 +246,9 @@ class FusionGraphBuilder(nn.Module):
         self.link_predictor = nn.Sequential(
             nn.Linear(2 * hidden_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.1),  # 添加dropout提高泛化能力
             nn.Linear(hidden_dim, 1),
-            nn.Sigmoid()
+            nn.ELU(alpha=1.0)  # 使用ELU替代Sigmoid
         )
         
         self.transformer_gate = TransformerGateNetwork(hidden_dim)
@@ -400,7 +401,11 @@ class FusionGraphBuilder(nn.Module):
                     selected_mask = torch.zeros_like(fusion_edge_scores, dtype=torch.bool)
                     selected_mask[top_indices] = True
             else:
-                selected_mask = fusion_edge_scores >= self.link_threshold
+                if fusion_edge_scores.numel() > 1:
+                    adaptive_threshold = torch.quantile(fusion_edge_scores, 0.7)  # 选择前30%的边
+                    selected_mask = fusion_edge_scores >= adaptive_threshold
+                else:
+                    selected_mask = torch.ones_like(fusion_edge_scores, dtype=torch.bool)
             
             if selected_mask.any():
                 selected_edges = candidate_edges[selected_mask]
