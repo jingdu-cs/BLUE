@@ -9,62 +9,44 @@ import logging
 from simple_graph_dataset import SimpleGraphDataset
 from HeteroGraphNetwork import FusionGNN
 from FullHeteroGNN import FullHeteroGNN
+from spectral_loss import compute_complete_heterogeneous_laplacian_wrapper, compute_fusion_laplacian_learned, compute_spectral_loss
 from metrics import calculate_metrics
 import datetime
 import numpy as np
 from sklearn.model_selection import KFold
 import pandas as pd
 import torch.linalg
-import math
-import scipy.linalg
+from torch.nn.utils import parametrize
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# 添加自定义Focal Loss实现
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-        self.eps = 1e-7  # 防止数值不稳定
+class InfectionWeightedMSELoss(nn.Module):
+    def __init__(self, zero_weight=1.0, low_weight=5.0, med_weight=10.0, high_weight=20.0,
+                 low_threshold=0.5, med_threshold=5.0, high_threshold=20.0):
+        super(InfectionWeightedMSELoss, self).__init__()
+        self.zero_weight = zero_weight
+        self.low_weight = low_weight 
+        self.med_weight = med_weight
+        self.high_weight = high_weight
+        self.low_threshold = low_threshold
+        self.med_threshold = med_threshold
+        self.high_threshold = high_threshold
         
     def forward(self, input, target):
-        # 计算L1损失
-        l1_loss = torch.abs(input - target)
+        mse_loss = (input - target) ** 2
+        weights = torch.ones_like(target) * self.zero_weight
         
-        # 计算focal权重：越难预测的样本（误差大的）权重越高
-        pt = torch.exp(-l1_loss)  # 将误差转换为概率形式
-        focal_weight = (1 - pt) ** self.gamma
+        low_mask = (target > self.low_threshold) & (target <= self.med_threshold)
+        weights[low_mask] = self.low_weight
         
-        # 应用focal权重
-        loss = self.alpha * focal_weight * l1_loss
+        med_mask = (target > self.med_threshold) & (target <= self.high_threshold)
+        weights[med_mask] = self.med_weight
         
-        # 根据reduction参数返回结果
-        if self.reduction == 'none':
-            return loss
-        elif self.reduction == 'sum':
-            return loss.sum()
-        else:  # mean
-            return loss.mean()
-
-# 加权L1损失，增强稀疏/罕见事件的权重
-class WeightedL1Loss(nn.Module):
-    def __init__(self, pos_weight=10.0, threshold=1.0):
-        super(WeightedL1Loss, self).__init__()
-        self.pos_weight = pos_weight  # 正样本权重
-        self.threshold = threshold  # 区分正负样本的阈值
+        high_mask = target > self.high_threshold
+        weights[high_mask] = self.high_weight
         
-    def forward(self, input, target):
-        l1_loss = torch.abs(input - target)
-        
-        # 创建权重矩阵：大于阈值的为正样本，使用更高的权重
-        weights = torch.ones_like(target)
-        weights[target > self.threshold] = self.pos_weight
-        
-        # 应用权重
-        weighted_loss = weights * l1_loss
+        weighted_loss = weights * mse_loss
         
         return weighted_loss.mean()
 
@@ -94,64 +76,6 @@ def compute_county_spatial_laplacian(x_dict, edge_index_dict, device):
     laplacian = deg - adj
     return laplacian
 
-
-def compute_fusion_laplacian_learned(fusion_features, fusion_edge_index, device):
-    num_fusion_nodes = fusion_features.size(0)
-    if num_fusion_nodes == 0 or fusion_edge_index.size(1) == 0:
-        logger.warning("No fusion nodes or learned edges for Fusion Laplacian.")
-        return torch.eye(num_fusion_nodes, device=device) if num_fusion_nodes > 0 else None
-
-    adj = torch.zeros((num_fusion_nodes, num_fusion_nodes), device=device)
-    src, dst = fusion_edge_index
-    valid_mask = (src < num_fusion_nodes) & (dst < num_fusion_nodes)
-    src, dst = src[valid_mask], dst[valid_mask]
-    adj[src, dst] = 1
-    deg = torch.diag(torch.sum(adj, dim=1))
-    laplacian = deg - adj
-    return laplacian
-
-
-def compute_spectral_loss(L_het, L_fus, k=10, device='cpu'):
-    if L_het is None or L_fus is None:
-        return torch.tensor(0.0, device=device, requires_grad=True)
-    if L_het.shape != L_fus.shape:
-        logger.warning(f"Laplacian shapes mismatch: Het {L_het.shape}, Fus {L_fus.shape}. Skipping spectral loss.")
-        return torch.tensor(0.0, device=device, requires_grad=True)
-    if L_het.size(0) < 2 or L_fus.size(0) < 2:  # Need at least 2 nodes for eigenvalues
-        return torch.tensor(0.0, device=device, requires_grad=True)
-
-    try:
-        eigvals_het = torch.linalg.eigvalsh(L_het.float())
-        stabilization_term = 1e-6
-        L_fus_stabilized = L_fus + stabilization_term * torch.eye(L_fus.size(0), device=L_fus.device, dtype=L_fus.dtype)
-        eigvals_fus = torch.linalg.eigvalsh(L_fus_stabilized.float())
-
-        eigvals_het_sorted, _ = torch.sort(eigvals_het)
-        eigvals_fus_sorted, _ = torch.sort(eigvals_fus)
-
-        k_eff = min(k, len(eigvals_het_sorted), len(eigvals_fus_sorted))
-        if k_eff == 0:
-            return torch.tensor(0.0, device=device, requires_grad=True)
-
-        if k_eff <= 1:
-            logger.warning(f"k_eff ({k_eff}) too small to skip the first eigenvalue. Returning 0 loss.")
-            return torch.tensor(0.0, device=device, requires_grad=True)
-    
-        vec_het = eigvals_het_sorted[1:k_eff]
-        vec_fus = eigvals_fus_sorted[1:k_eff]
-        loss = 1.0 - torch.nn.functional.cosine_similarity(vec_het, vec_fus, dim=0, eps=1e-8)
-
-        if torch.isnan(loss) or torch.isinf(loss):
-            logger.warning("NaN or Inf detected in spectral loss. Returning 0.")
-            return torch.tensor(0.0, device=device, requires_grad=True)
-
-        return loss
-    except torch.linalg.LinAlgError as e:
-        logger.warning(f"Eigenvalue computation failed: {e}. Skipping spectral loss.")
-        return torch.tensor(0.0, device=device, requires_grad=True)
-    except Exception as e:
-        logger.error(f"Unexpected error during spectral loss calculation: {e}")
-        return torch.tensor(0.0, device=device, requires_grad=True)
 
 
 def collate_fn(batch):
@@ -192,7 +116,7 @@ def collate_fn(batch):
 
 
 def train(model, train_loader, optimizer, criterion, device, dataset, writer=None, epoch=None, fold=None,
-          spectral_gamma=0.3, spectral_k=10):
+          spectral_gamma=0.3, spectral_k=10, use_eigenvalue_constraint=True, eigenvalue_loss_type='cosine_similarity'):
     model.train()
     total_loss = 0
     total_pred_loss = 0
@@ -313,30 +237,33 @@ def train(model, train_loader, optimizer, criterion, device, dataset, writer=Non
                     last_input_graph = device_graphs[-1][i]
                     if last_input_graph and hasattr(last_input_graph, 'x_dict') and hasattr(last_input_graph,
                                                                                             'edge_index_dict'):
-                        L_het = compute_county_spatial_laplacian(
+                        L_het, P, node_mapping = compute_complete_heterogeneous_laplacian_wrapper(
                             last_input_graph.x_dict, last_input_graph.edge_index_dict, device)
+                        
+                        if L_het is None:
+                            L_het = compute_county_spatial_laplacian(
+                                last_input_graph.x_dict, last_input_graph.edge_index_dict, device)
+                                
+                        encoded_x_dict = model.encode_heterograph(
+                            last_input_graph.x_dict, last_input_graph.edge_index_dict)
+                        corrected_x_dict = model.mrf_correction(
+                            encoded_x_dict, last_input_graph.edge_index_dict)
 
-                        try:
-                            encoded_x_dict = model.encode_heterograph(
-                                last_input_graph.x_dict, last_input_graph.edge_index_dict)
-                            corrected_x_dict = model.mrf_correction(
-                                encoded_x_dict, last_input_graph.edge_index_dict)
+                        fusion_features_i, fusion_edge_index_i, _ = fusion_builder(
+                            corrected_x_dict, last_input_graph.edge_index_dict)
 
-                            fusion_features_i, fusion_edge_index_i, _ = fusion_builder(
-                                corrected_x_dict, last_input_graph.edge_index_dict)
+                        L_fus = compute_fusion_laplacian_learned(
+                            fusion_features_i, fusion_edge_index_i, device)
 
-                            L_fus = compute_fusion_laplacian_learned(
-                                fusion_features_i, fusion_edge_index_i, device)
-
-                            if L_het is not None and L_fus is not None:
-                                sample_spec_loss = compute_spectral_loss(L_het, L_fus, k=spectral_k, device=device)
-                            else:
-                                logger.warning(f"Could not compute Laplacians for sample {i}, batch {batch_idx}")
-
-                        except Exception as e:
-                            logger.error(
-                                f"Error during per-sample fusion/Laplacian computation for sample {i}, batch {batch_idx}: {e}")
-                            sample_spec_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                        if L_het is not None and L_fus is not None:
+                            use_l2_norm = P is not None
+                            sample_spec_loss = compute_spectral_loss(
+                                L_het, L_fus, k=spectral_k, device=device, P=P, 
+                                use_l2_norm=use_l2_norm, 
+                                use_eigenvalue_constraint=use_eigenvalue_constraint,
+                                eigenvalue_loss_type=eigenvalue_loss_type)
+                        else:
+                            logger.warning(f"Could not compute Laplacians for sample {i}, batch {batch_idx}")
                     else:
                         logger.warning(
                             f"Missing graph data for spectral loss calculation for sample {i}, batch {batch_idx}.")
@@ -460,55 +387,8 @@ def evaluate(model, val_loader, criterion, device, dataset, writer=None, epoch=N
                     time_loss = criterion(preds_t, target_t)
                     sample_loss += time_loss
                     valid_timepoints += 1
-
-                    current_outputs = preds_t.unsqueeze(-1) if preds_t.dim() == 1 else preds_t
-                    denorm_outputs_t = current_outputs.squeeze(-1)
-
-                    if hasattr(dataset, 'norm_list') and dataset.norm_list:
-                        try:
-                            to_denormalize = current_outputs.squeeze(-1) if current_outputs.dim() > 2 else current_outputs
-                            
-                            num_features = to_denormalize.shape[-1] if to_denormalize.dim() > 1 else 1
-                            
-                            if num_features == 1 and to_denormalize.dim() == 1:
-                                to_denormalize = to_denormalize.unsqueeze(-1)
-                            
-                            denorm_outputs_t = torch.zeros_like(to_denormalize)
-                            
-                            for feature_idx in range(num_features):
-                                feature_data = to_denormalize[:, feature_idx] if num_features > 1 else to_denormalize
-                                
-                                if feature_idx < len(dataset.norm_list):
-                                    if dataset.norm_mode == 'z_score':
-                                        target_device = dataset.norm_list[feature_idx]['mean'].device
-                                    elif dataset.norm_mode == 'log_minmax':
-                                        target_device = dataset.norm_list[feature_idx]['log_min'].device
-                                    else:
-                                        target_device = dataset.norm_list[feature_idx]['min'].device
-                                    
-                                    feature_data = feature_data.to(target_device)
-                                    
-                                    if dataset.norm_mode == 'minmax':
-                                        denorm_feature = dataset.minmax_denormalize(feature_data, feature_idx)
-                                    elif dataset.norm_mode == 'z_score':
-                                        denorm_feature = dataset.z_score_denormalize(feature_data, feature_idx)
-                                    elif dataset.norm_mode == 'log_minmax':
-                                        denorm_feature = dataset.log_minmax_denormalize(feature_data, feature_idx)
-                                    elif dataset.norm_mode == 'log_plus_one':
-                                        denorm_feature = dataset.log_plus_one_denormalize(feature_data, feature_idx)
-                                    
-                                    if num_features > 1:
-                                        denorm_outputs_t[:, feature_idx] = denorm_feature
-                                    else:
-                                        denorm_outputs_t = denorm_feature
-                                else:
-                                    logger.warning(f"No normalization data for feature {feature_idx}. Skipping denormalization.")
-                            
-                        except Exception as e:
-                            logger.warning(f"Error during evaluation denormalization: {e}")
-                            denorm_outputs_t = current_outputs.squeeze(-1) if current_outputs.dim() > 1 else current_outputs
-
-                    all_preds.append(denorm_outputs_t.cpu())
+                    
+                    all_preds.append(preds_t.cpu())
                     all_targets.append(target_t.cpu())
 
                 if valid_timepoints > 0:
@@ -534,20 +414,25 @@ def main():
     parser = argparse.ArgumentParser(description='Train a temporal GNN model for infection prediction')
     parser.add_argument('--dataset', type=str, default='avian',
                         help='Dataset to use, japan or avian')
-    parser.add_argument('--data_dir', type=str, default='/scratch/hn98/jd2651/processed_graphs',
-                        help='Directory containing graph pickle files, for japan, it is /scratch/hn98/jd2651/processed_graphs, for avian, it is /scratch/hn98/jd2651/30_processed_graphs')
+    parser.add_argument('--data_dir', type=str, default='/scratch/processed_graphs',
+                        help='Directory containing graph pickle files, for japan, it is /scratch/processed_japan, for avian, it is /scratch/processed_graphs')
     parser.add_argument('--batch_size', type=int, default=2, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=0.00001, help='Learning rate')
     parser.add_argument('--hidden_dim', type=int, default=8, help='Hidden dimension size')
     parser.add_argument('--num_mrf', type=int, default=1, help='Iteration of MRF correction')
-    parser.add_argument('--window_size', type=int, default=5, help='Input window size (weeks)')
-    parser.add_argument('--pred_horizon', type=int, default=3, help='Prediction horizon (weeks)')
+    parser.add_argument('--window_size', type=int, default=4, help='Input window size (weeks)')
+    parser.add_argument('--pred_horizon', type=int, default=4, help='Prediction horizon (weeks)')
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout rate')
-    parser.add_argument('--spectral_gamma', type=float, default=0.0,
+    parser.add_argument('--spectral_gamma', type=float, default=0.2,
                         help='Weight for the spectral regularization loss (default: 0.0, disabled)')
     parser.add_argument('--spectral_k', type=int, default=10,
                         help='Number of eigenvalues (k) to compare for spectral loss')
+    parser.add_argument('--use_eigenvalue_constraint', type=bool, default=True,
+                        help='Use eigenvalue constraint to handle dimension mismatch')
+    parser.add_argument('--eigenvalue_loss_type', type=str, default='cosine_similarity',
+                        choices=['cosine_similarity', 'mse', 'kl_divergence', 'wasserstein'],
+                        help='Type of loss function for eigenvalue constraint')
     parser.add_argument('--model_dir', type=str, default='./saved_results', help='Directory to save models')
     parser.add_argument('--model_type', type=str, default='FusionGNN',
                         choices=['FullHeteroGNN', 'FusionGNN'], help='Type of model to use')
@@ -575,13 +460,44 @@ def main():
                         help='Device to use for training')
     parser.add_argument('--weight_decay', type=float, default=0.0001, 
                     help='Weight decay (L2 penalty) for optimizer')
-    parser.add_argument('--norm_mode', type=str, default='log_plus_one',
+    parser.add_argument('--norm_mode', type=str, default='z_score',
                         choices=['minmax', 'z_score', 'log_minmax', 'log_plus_one'],
                         help='Normalization mode for dataset')
-    parser.add_argument('--previous_weight', type=float, default=0.3,
-                        help='Previous weight for the model')
+    parser.add_argument('--previous_weight', type=float, default=0.1,
+                        help='Weight for the previous step in FusionGNN')
+    parser.add_argument('--initial_weight', type=float, default=0.3,
+                        help='Weight for the initial hidden state in FusionGNN')
+    
+    # loss arguments
+    parser.add_argument('--loss_type', type=str, default='infection_weighted',
+                        choices=['mse', 'infection_weighted'],
+                        help='Type of loss function to use')
+    parser.add_argument('--infection_zero_weight', type=float, default=1.0,
+                        help='Weight for zero infection cases')
+    parser.add_argument('--infection_low_weight', type=float, default=5.0,
+                        help='Weight for low infection cases')
+    parser.add_argument('--infection_med_weight', type=float, default=10.0,
+                        help='Weight for medium infection cases')
+    parser.add_argument('--infection_high_weight', type=float, default=20.0,
+                        help='Weight for high infection cases')
+    parser.add_argument('--infection_low_threshold', type=float, default=0.5,
+                        help='Threshold for low infection cases')
+    parser.add_argument('--infection_med_threshold', type=float, default=5.0,
+                        help='Threshold for medium infection cases')
+    parser.add_argument('--infection_high_threshold', type=float, default=20.0,
+                        help='Threshold for high infection cases')
+    
+    # post-processing arguments
+    parser.add_argument('--use_post_processing', type=bool, default=True,
+                        help='Whether to use post-processing for predictions')
+    parser.add_argument('--detection_threshold', type=float, default=0.3,
+                        help='Threshold for infection detection in post-processing')
+    parser.add_argument('--min_prediction', type=float, default=0.0,
+                        help='Minimum allowed prediction value')
+    
     args = parser.parse_args()
-
+    
+    args.model_dir = args.model_dir + '_' + args.loss_type + '_' + str(args.pred_horizon) + '_' + str(args.spectral_gamma)
     os.makedirs(args.model_dir, exist_ok=True)
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
@@ -667,10 +583,9 @@ def main():
                     top_k=args.top_k,
                     num_mrf=args.num_mrf,
                     device=args.device,
-                    county_input_dim=county_input_dim,
-                    previous_weight=args.previous_weight
+                    county_input_dim=county_input_dim
                 ).to(args.device)
-            else:  # Default to FullHeteroGNN
+            else:
                 model = FullHeteroGNN(
                     hidden_dim=args.hidden_dim,
                     num_layers=1,
@@ -681,23 +596,31 @@ def main():
                 ).to(args.device)
 
             optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-            # 替换原有的MSELoss为自定义的FocalLoss
-            if args.dataset == 'avian':
+            
+            if args.loss_type == 'mse':
                 criterion = nn.MSELoss()
+                logger.info("Using MSE Loss")
+            elif args.loss_type == 'infection_weighted':
+                criterion = InfectionWeightedMSELoss(
+                    zero_weight=args.infection_zero_weight,
+                    low_weight=args.infection_low_weight,
+                    med_weight=args.infection_med_weight,
+                    high_weight=args.infection_high_weight,
+                    low_threshold=args.infection_low_threshold,
+                    med_threshold=args.infection_med_threshold,
+                    high_threshold=args.infection_high_threshold
+                )
+                logger.info(f"Using Infection Weighted MSE Loss (weights: {args.infection_zero_weight}, {args.infection_low_weight}, {args.infection_med_weight}, {args.infection_high_weight})")
             else:
                 criterion = nn.MSELoss()
-            # criterion = nn.MSELoss()
-            # criterion = FocalLoss(alpha=1.0, gamma=2.0)
-            # 或者使用加权L1Loss:
-            # criterion = WeightedL1Loss(pos_weight=10.0, threshold=1.0)
+                logger.warning(f"Unknown loss type '{args.loss_type}', using MSE Loss as default")
 
             logger.info(f"Starting training for fold {fold + 1}...")
             best_mse = float('inf')
             best_f1 = 0.0
+            best_train_loss = float('inf')
             best_mae = float('inf')
-            best_model_state = None
-            
-            # Early stopping parameters
+            best_model_state = None 
             patience = 10
             counter = 0
             
@@ -705,70 +628,76 @@ def main():
                 train_pred_loss, _ = train(
                     model, train_loader, optimizer, criterion, args.device, full_dataset,
                     writer=None, epoch=epoch, fold=fold + 1,
-                    spectral_gamma=args.spectral_gamma, spectral_k=args.spectral_k)
-                multistep_train_metrics, avg_train_metrics = calculate_metrics(args,
-                                                  model, train_loader, args.device, full_dataset,
-                                                  pred_horizon=args.pred_horizon, mode=args.dataset, set='train')
+                    spectral_gamma=args.spectral_gamma, spectral_k=args.spectral_k,
+                    use_eigenvalue_constraint=args.use_eigenvalue_constraint,
+                    eigenvalue_loss_type=args.eigenvalue_loss_type)
 
                 logger.info(
                     f"Fold {fold + 1}, Epoch {epoch + 1}/{args.epochs} - Train Pred Loss: {train_pred_loss:.4f}")
-                if avg_train_metrics:
-                    logger.info(
-                        f"Avg Train Metrics - MSE: {avg_train_metrics['mse']:.4f}, MAE: {avg_train_metrics['mae']:.4f}, F1: {avg_train_metrics['f1']:.4f}")
+                if train_pred_loss < best_train_loss:
+                    best_train_loss = train_pred_loss
+                    logger.info(f"Best Train Loss: {best_train_loss:.4f}")
+                    best_model_state = model.state_dict().copy()
 
-                    if avg_train_metrics['mae'] < best_mae:
-                        print('save best model on validation MAE for this fold')
-                        best_mse = avg_train_metrics['mse']
-                        best_f1 = avg_train_metrics['f1']
-                        best_mae = avg_train_metrics['mae']
-                        best_model_state = model.state_dict().copy()
-                        
-                        # Reset early stopping counter since we improved
-                        counter = 0
+                    save_path = os.path.join(args.model_dir, f'best_model_fold{fold + 1}.pt')
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': best_model_state,
+                        'train_loss': train_pred_loss,
+                        'best_mse': best_mse,
+                        'best_f1': best_f1,
+                        'best_mae': best_mae,
+                        'args': vars(args)
+                    }, save_path)
 
-                        save_path = os.path.join(args.model_dir, f'best_model_fold{fold + 1}.pt')
-                        torch.save({
-                            'epoch': epoch,
-                            'model_state_dict': best_model_state,
-                            'train_metrics': avg_train_metrics,
-                            'best_mse': best_mse,
-                            'best_f1': best_f1,
-                            'best_mae': best_mae,
-                            'args': vars(args)
-                        }, save_path)
-
-                        logger.info(f"Saved new best model for fold {fold + 1} to {save_path} with MAE: {best_mae:.4f}")
-                    else:
-                        print('not save best model on validation MAE for this fold')
-                        # Increment early stopping counter
-                        counter += 1
-                        logger.info(f"Early stopping counter: {counter}/{patience}")
-                        
-                        # Check if we should stop training
-                        if counter >= patience:
-                            logger.info(f"Early stopping triggered after {epoch + 1} epochs for fold {fold + 1}")
-                            break
+                    logger.info(f"Saved new best model for fold {fold + 1} to {save_path} with Train Loss: {train_pred_loss:.4f}")
+                else:
+                    print('not save best model on validation MAE for this fold')
+                    counter += 1
+                    logger.info(f"Early stopping counter: {counter}/{patience}")
+                    if counter >= patience:
+                        logger.info(f"Early stopping triggered after {epoch + 1} epochs for fold {fold + 1}")
+                        break
 
             if best_model_state is not None:
-                model.load_state_dict(best_model_state)
+                model.load_state_dict(best_model_state, strict=True)
+                logger.info(f"Successfully loaded model state dict for fold {fold + 1}")
             else:
                 logger.warning(f"No best model saved for fold {fold + 1}. Testing with final model state.")
 
+            prediction_save_dir = os.path.join(args.model_dir, f'fold_{fold+1}_predictions')
+
             multistep_test_metrics, avg_test_metrics = calculate_metrics(args,
                                              model, test_loader, args.device, full_dataset,
-                                             pred_horizon=args.pred_horizon, mode=args.dataset, set='test')
+                                             pred_horizon=args.pred_horizon, mode=args.dataset, set='test',
+                                             save_predictions=False, save_dir=prediction_save_dir)
 
             if avg_test_metrics:
                 logger.info(f"Fold {fold + 1} Test Metrics:")
                 logger.info(f"MSE: {avg_test_metrics['mse']:.4f}, RMSE: {avg_test_metrics['rmse']:.4f}, "
-                            f"MAE: {avg_test_metrics['mae']:.4f}, F1: {avg_test_metrics['f1']:.4f}")
+                            f"MAE: {avg_test_metrics['mae']:.4f}, F1: {avg_test_metrics['f1']:.4f}, "
+                            f"FPR: {avg_test_metrics.get('fpr', 0.0):.4f}")
+                
+                if 'detection_precision' in avg_test_metrics:
+                    logger.info(f"Enhanced Test Metrics:")
+                    logger.info(f"  Detection - Precision: {avg_test_metrics['detection_precision']:.3f}, "
+                                f"Recall: {avg_test_metrics['detection_recall']:.3f}, "
+                                f"F1: {avg_test_metrics['detection_f1']:.3f}, "
+                                f"Accuracy: {avg_test_metrics['detection_accuracy']:.3f}, "
+                                f"FPR: {avg_test_metrics.get('detection_fpr', 0.0):.3f}")
+                    logger.info(f"  Regression (infection samples) - MSE: {avg_test_metrics.get('regression_mse', 0):.4f}, "
+                                f"MAE: {avg_test_metrics.get('regression_mae', 0):.4f}")
+                    logger.info(f"  Data Distribution - Infection Rate: {avg_test_metrics.get('infection_rate', 0):.2%}")
+                
                 all_fold_metrics.append({
                     'fold': fold + 1,
                     'test_mse': avg_test_metrics['mse'],
                     'test_rmse': avg_test_metrics['rmse'],
                     'test_mae': avg_test_metrics['mae'],
                     'test_f1': avg_test_metrics['f1'],
-                    'test_pearson': avg_test_metrics.get('pearson', 0.0),  # 添加皮尔逊相关系数
+                    'test_fpr': avg_test_metrics.get('fpr', 0.0),
+                    'test_pearson': avg_test_metrics.get('pearson', 0.0),
+                    'test_spearman': avg_test_metrics.get('spearman', 0.0),
                 })
             else:
                 logger.warning(f"Could not calculate test metrics for fold {fold + 1}")
@@ -781,26 +710,34 @@ def main():
         test_rmse_values = [fold_data['test_rmse'] for fold_data in all_fold_metrics]
         test_mae_values = [fold_data['test_mae'] for fold_data in all_fold_metrics]
         test_f1_values = [fold_data['test_f1'] for fold_data in all_fold_metrics]
+        test_fpr_values = [fold_data['test_fpr'] for fold_data in all_fold_metrics]
         test_pearson_values = [fold_data['test_pearson'] for fold_data in all_fold_metrics]
+        test_spearman_values = [fold_data['test_spearman'] for fold_data in all_fold_metrics]
 
         avg_test_mse = np.mean(test_mse_values)
         avg_test_rmse = np.mean(test_rmse_values)
         avg_test_mae = np.mean(test_mae_values)
         avg_test_f1 = np.mean(test_f1_values)
+        avg_test_fpr = np.mean(test_fpr_values)
         avg_test_pearson = np.mean(test_pearson_values)
+        avg_test_spearman = np.mean(test_spearman_values)
 
         std_test_mse = np.std(test_mse_values)
         std_test_rmse = np.std(test_rmse_values)
         std_test_mae = np.std(test_mae_values)
         std_test_f1 = np.std(test_f1_values)
+        std_test_fpr = np.std(test_fpr_values)
         std_test_pearson = np.std(test_pearson_values)
+        std_test_spearman = np.std(test_spearman_values)
 
         logger.info("===== Cross-Validation Results =====")
         logger.info(f"Average Test MSE: {avg_test_mse:.4f} ± {std_test_mse:.4f}")
         logger.info(f"Average Test RMSE: {avg_test_rmse:.4f} ± {std_test_rmse:.4f}")
-        logger.info(f"Average Test MAE: {avg_test_mae:.4f} ± {std_test_mae:.4f}")
+        logger.info(f"Average Test MAE: {avg_test_mae:.4f} ± {std_test_mae:.4f}")        
         logger.info(f"Average Test F1: {avg_test_f1:.4f} ± {std_test_f1:.4f}")
+        logger.info(f"Average Test FPR: {avg_test_fpr:.4f} ± {std_test_fpr:.4f}")
         logger.info(f"Average Test Pearson: {avg_test_pearson:.4f} ± {std_test_pearson:.4f}")
+        logger.info(f"Average Test Spearman: {avg_test_spearman:.4f} ± {std_test_spearman:.4f}")
 
         results_df = pd.DataFrame(all_fold_metrics)
         result_name = 'cross_validation_results_window' + str(args.window_size) + '_horizon' + str(
@@ -820,14 +757,16 @@ def main():
             for fold_data in all_fold_metrics:
                 fold = fold_data['fold']
                 log_file.write(f"Fold {fold} - MSE: {fold_data['test_mse']:.4f}, RMSE: {fold_data['test_rmse']:.4f}, "
-                               f"MAE: {fold_data['test_mae']:.4f}, F1: {fold_data['test_f1']:.4f}\n")
+                               f"MAE: {fold_data['test_mae']:.4f}, F1: {fold_data['test_f1']:.4f}, FPR: {fold_data['test_fpr']:.4f}\n")
 
             log_file.write("\nAverage Results across all folds:\n")
             log_file.write(f"MSE: {avg_test_mse:.4f} ± {std_test_mse:.4f}\n")
             log_file.write(f"RMSE: {avg_test_rmse:.4f} ± {std_test_rmse:.4f}\n")
             log_file.write(f"MAE: {avg_test_mae:.4f} ± {std_test_mae:.4f}\n")
             log_file.write(f"F1: {avg_test_f1:.4f} ± {std_test_f1:.4f}\n")
-            log_file.write(f"Pearson Correlation: {avg_test_pearson:.4f} ± {std_test_pearson:.4f}\n")  # 打印皮尔逊相关系数
+            log_file.write(f"FPR: {avg_test_fpr:.4f} ± {std_test_fpr:.4f}\n")
+            log_file.write(f"Pearson Correlation: {avg_test_pearson:.4f} ± {std_test_pearson:.4f}\n")
+            log_file.write(f"Spearman Correlation: {avg_test_spearman:.4f} ± {std_test_spearman:.4f}\n")
 
         logger.info(f"Cross-validation summary saved to {summary_filename}")
 
