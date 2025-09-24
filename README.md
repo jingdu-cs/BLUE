@@ -1,19 +1,22 @@
 # BLUE: Bi-layer Heterogeneous Graph Fusion Network for Avian Influenza Forecasting
 
-Accurate forecasting of avian influenza outbreaks within wild bird populations requires models that account for complex, multi-scale transmission patterns driven by various factors. Spatio-temporal models have recently gained traction for infection forecasting due to their ability to capture relational dynamics, but most existing frameworks rely solely on spatial connections at the county level. This overlooks valuable genetic information at the case level, which is essential for understanding how avian influenza spreads through epidemiological linkages beyond geography. We address this gap with \textit{BLUE}, a \textbf{B}i-\textbf{L}ayer heterogeneous graph f\textbf{U}sion n\textbf{E}twork designed to integrate genomic and spatial data for accurate outbreak forecasting. The framework 1) builds heterogeneous graphs from multiple information sources and multiple layers 2) smooths across relation types, 3) performs fusion at node and edge levels while retaining structural patterns, and  4) predicts future outbreaks via an autoregressive graph sequence model that captures transmission dynamics over time.  To facilitate further research, we introduce \textbf{Aivan-NA} dataset, the public dataset for avian influenza outbreak forecasting in the United States, incorporating genetic, spatial, and ecological data across 3227 counties. BLUE achieves superior performance over existing baselines, highlighting the value of incorporating multi-modal information into infectious disease forecasting.
+Accurate forecasting of avian influenza outbreaks within wild bird populations requires models that account for complex, multi-scale transmission patterns driven by various factors. Spatio-temporal GNN-based models have recently gained traction for infection forecasting due to their ability to capture relations and flow between spatial regions, but most existing frameworks rely solely on spatial regions and their connections. This overlooks valuable genetic information at the case level, such as cases in one region being genetically descended from strains in another, which is essential for understanding how infectious diseases spread through epidemiological linkages beyond geography.We address this gap with **BLUE**, a **B**i-**L**ayer heterogeneous graph f**U***sion n**E**twork designed to integrate genetic, spatial, and ecological data for accurate outbreak forecasting.
+The framework 1) builds heterogeneous graphs from multiple information sources and multiple layers,2) smooths across relation types, 3) performs fusion while retaining structural patterns, and 4) predicts future outbreaks via an autoregressive graph sequence model that captures transmission dynamics over time. To facilitate further research, we introduce **Avian-US** dataset, the dataset for avian influenza outbreak forecasting in the United States, incorporating genetic, spatial, and ecological data across locations. BLUE achieves superior performance over existing baselines, highlighting the value of incorporating multi-layer information into infectious disease forecasting.
 
 
 
 ## 🗂️ Repository structure
 
 ```
-├── HeteroGraphNetwork.py   # BLUE implementation
-├── MRF.py                  # Markov Random Field smoothing module
-├── simple_graph_dataset.py # Windowed time‑series dataset loader
-├── metrics.py              # Prediction process
-├── Model_metrics.py        # MAE / RMSE / PCC /F1 Score evaluation metrics
-├── spectral_simple_main.py # Train / Val / Eval entry‑point
-└── requirements.txt        # environments
+├── HeteroGraphNetwork.py         # BLUE implementation
+├── spectral_loss.py              # Spectral Alignment loss implementation
+├── laplacian.py                  # Laplacian Matrix implementation
+├── MRF.py                        # Markov Random Field smoothing module
+├── simple_graph_dataset.py       # Windowed time‑series dataset loader
+├── metrics.py                    # Prediction process
+├── Model_metrics.py              # MAE / RMSE / PCC /SCC / F1 Score evaluation metrics
+├── spectral_simple_main.py       # Train / Val / Eval entry‑point
+└── requirements.txt              # environments
 ```
 
 
