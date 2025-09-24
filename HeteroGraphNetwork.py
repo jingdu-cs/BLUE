@@ -6,20 +6,38 @@ from torch_scatter import scatter
 from MRF import MRFCorrection
 from torch_geometric.data import Data, Batch
 from torch_geometric.nn import global_mean_pool
+from torch.nn.utils import parametrizations
+import torch.nn.functional as F
+
+
+def apply_spectral_norm_dynamic(weight, u=None, eps=1e-12, n_power_iterations=1):
+    if u is None:
+        u = F.normalize(torch.randn(height, device=weight.device, dtype=weight.dtype), dim=0, eps=eps)
+    
+    with torch.no_grad():
+        for _ in range(n_power_iterations):
+            # v = W^T @ u / ||W^T @ u||
+            v = F.normalize(weight.t() @ u, dim=0, eps=eps)
+            # u = W @ v / ||W @ v||
+            u = F.normalize(weight @ v, dim=0, eps=eps)
+        
+        sigma = torch.dot(u, weight @ v)
+        
+        if sigma.item() < 0:
+            u = -u
+            sigma = -sigma
+    
+    normalized_weight = weight / (sigma + eps)
+    
+    return normalized_weight, u.detach()
 
 class TransformerGateNetwork(nn.Module):
-    """
-    Transformer-based edge fusion gate network
-    Used to dynamically fuse spatial and genetic relationships
-    Uses cross-attention mechanism, with node features as query to query edge features
-    Can choose to use edge features, or completely generate weights based on node features if not used
-    """
     def __init__(self, hidden_dim, num_heads=4, num_layers=2, dropout=0.5, use_edge_features=True):
         super(TransformerGateNetwork, self).__init__()
         self.hidden_dim = hidden_dim
         self.use_edge_features = use_edge_features
         
-        self.edge_type_embedding = nn.Embedding(2, hidden_dim)  # 0: spatial, 1: genetic
+        self.edge_type_embedding = nn.Embedding(2, hidden_dim)
 
         self.edge_feat_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -65,12 +83,6 @@ class TransformerGateNetwork(nn.Module):
             )
     
     def forward(self, node_i_feat, node_j_feat, edge_features, edge_types, padding_mask=None):
-        """
-        Forward pass: calculate weights for each edge
-            
-        Returns:
-            edge_weights: weights for each edge [num_edges, 1]
-        """
         if len(edge_features) == 0:
             return torch.empty(0, 1, device=node_i_feat.device)
         
@@ -78,7 +90,7 @@ class TransformerGateNetwork(nn.Module):
         num_edges = len(edge_features)
         
         if not self.use_edge_features:
-            node_pair = torch.cat([node_i_feat, node_j_feat])  # [hidden_dim*2]
+            node_pair = torch.cat([node_i_feat, node_j_feat])
             
             unique_types = torch.unique(torch.tensor(edge_types, device=device))
             edge_weights = torch.zeros(num_edges, 1, device=device)
@@ -181,14 +193,6 @@ class TransformerTemporalFusion(nn.Module):
         self.single_step_proj = nn.Linear(hidden_dim, hidden_dim)
         
     def forward(self, features_sequence, attention_mask=None):
-        """
-        Args:
-            features_sequence: fused node feature sequence [batch_size, seq_len, hidden_dim] or [num_nodes, seq_len, hidden_dim]
-            attention_mask: attention mask [batch_size, seq_len] or [num_nodes, seq_len], marking valid time steps
-            
-        Returns:
-            fused_features: fused features [batch_size, hidden_dim] or [num_nodes, hidden_dim]
-        """
         batch_size, seq_len, _ = features_sequence.shape
         device = features_sequence.device
         
@@ -227,10 +231,6 @@ class TransformerTemporalFusion(nn.Module):
 
 
 class FusionGraphBuilder(nn.Module):
-    """
-    Fusion Graph Builder for heterogeneous graphs.
-    Creates fusion nodes by combining case and county nodes and builds a new graph with learned edges.
-    """
     def __init__(self, hidden_dim, link_threshold=0.5, use_top_k=False, top_k=10):
         super(FusionGraphBuilder, self).__init__()
         self.hidden_dim = hidden_dim
@@ -262,13 +262,6 @@ class FusionGraphBuilder(nn.Module):
             self.projections = F.normalize(self.projections, p=2, dim=1)
             
     def _compute_lsh_hash(self, features):
-        """
-        Args:
-            features: [num_nodes, hidden_dim]
-            
-        Returns:
-            hash_codes: binary hash codes [num_nodes, n_projections]
-        """
         self._init_lsh_projections(features.device)
         projections = torch.matmul(features, self.projections.t())
         hash_codes = (projections > 0).float()
@@ -585,14 +578,6 @@ class FusionGraphBuilder(nn.Module):
         return fusion_edge_dict
     
     def forward(self, x_dict, edge_index_dict):
-        """
-        Generate fusion nodes and build the fusion graph
-        
-        Returns:
-            fusion_features: fused node features
-            fusion_edge_index: learned edges between fusion nodes
-            fusion_hetero_edges: edges from original heterogeneous edges to fusion nodes
-        """
         fusion_features, fusion_mapping, case_indices, county_indices = self.generate_fusion_nodes(
             x_dict, edge_index_dict)
         
@@ -605,14 +590,7 @@ class FusionGraphBuilder(nn.Module):
         return fusion_features, fusion_edge_index, fusion_hetero_edges
 
     def _find_candidate_pairs_lsh(self, fusion_features, max_pairs=None):
-        """
-        Args:
-            fusion_features: fused node features [num_nodes, hidden_dim]
-            max_pairs: maximum number of candidate pairs
-            
-        Returns:
-            candidate_edges: candidate edge tensor [num_edges, 2], representing (i,j) edge pairs
-        """
+        
         num_nodes = fusion_features.size(0)
         device = fusion_features.device
         
@@ -732,23 +710,22 @@ class FusionGraphBuilder(nn.Module):
 
 
 class FusionGNN(nn.Module):
-    """
-    Graph Neural Network that operates on the fusion graph generated from a heterogeneous graph.
-    Implements an encoder-decoder architecture for autoregressive prediction.
-    """
+
     def __init__(self, channel=2, hidden_dim=64, num_layers=2, dropout=0.3, pred_horizon=4,
                  link_threshold=0.5, use_top_k=False, top_k=10, num_mrf=3, device=None,
                  use_transformer_temporal=True, transformer_heads=4, transformer_layers=2,
-                 county_input_dim=None, previous_weight=0.3):
+                 county_input_dim=None, previous_weight=0.15, initial_weight=0.1):
         super(FusionGNN, self).__init__()
         
+        self.previous_weight = previous_weight
+        self.initial_weight = initial_weight
         self.hidden_dim = hidden_dim
         self.pred_horizon = pred_horizon
         self.num_mrf = num_mrf
         self.num_layers = num_layers
         self.device = device
         self.use_transformer_temporal = use_transformer_temporal
-        self.previous_weight = previous_weight
+
         self.node_types = ['county', 'case']
         self.edge_types = [
             ('county', 'spatial', 'county'),
@@ -772,27 +749,32 @@ class FusionGNN(nn.Module):
         ).to(self.device)
         
         self.county_input_dim = county_input_dim
-        self.county_encoder = nn.Linear(self.county_input_dim, hidden_dim).to(self.device)
-        self.case_encoder = nn.Linear(1, hidden_dim).to(self.device)
+        self.county_encoder = parametrizations.weight_norm(nn.Linear(self.county_input_dim, hidden_dim)).to(self.device)
+        self.case_encoder = parametrizations.weight_norm(nn.Linear(1, hidden_dim)).to(self.device)
         
         self.encoder_convs = nn.ModuleList()
+        self.encoder_layer_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim) for _ in range(num_layers)
+        ])
         for _ in range(num_layers):
-            self.encoder_convs.append(SAGEConv((-1, -1), hidden_dim)).to(self.device)
+            conv = SAGEConv(hidden_dim, hidden_dim).to(self.device)
+            self.encoder_convs.append(conv)
         
         self.decoder_convs = nn.ModuleList()
         for _ in range(num_layers):
-            self.decoder_convs.append(SAGEConv((-1, -1), hidden_dim)).to(self.device)
+            conv = SAGEConv(hidden_dim, hidden_dim).to(self.device)
+            self.decoder_convs.append(conv)
         
-        self.bottleneck = nn.Linear(hidden_dim, hidden_dim).to(self.device)
+        self.bottleneck = parametrizations.weight_norm(nn.Linear(hidden_dim, hidden_dim)).to(self.device)
         
         self.prediction_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            parametrizations.weight_norm(nn.Linear(hidden_dim, hidden_dim)),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, channel)
+            parametrizations.weight_norm(nn.Linear(hidden_dim, channel))
         ).to(self.device)
         
-        self.prediction_to_feature = nn.Linear(channel, hidden_dim).to(self.device)
+        self.prediction_to_feature = parametrizations.weight_norm(nn.Linear(channel, hidden_dim)).to(self.device)
         
         if use_transformer_temporal:
             self.temporal_integration = TransformerTemporalFusion(
@@ -807,10 +789,40 @@ class FusionGNN(nn.Module):
         
         self.year_encoder = None
         self.week_encoder = None
-        self.temporal_proj = nn.Linear(hidden_dim * 3, hidden_dim).to(self.device)
-        self.proj = nn.Linear(hidden_dim * 2, hidden_dim).to(self.device)
+        self.temporal_proj = parametrizations.weight_norm(nn.Linear(hidden_dim * 3, hidden_dim)).to(self.device)
+        self.proj = parametrizations.weight_norm(nn.Linear(hidden_dim * 2, hidden_dim)).to(self.device)
         
         self.dropout = nn.Dropout(dropout).to(self.device)
+        
+        self.spectral_u_buffers = nn.ParameterDict()
+        for i in range(num_layers):
+            self.spectral_u_buffers[f'encoder_{i}_lin_l_u'] = nn.Parameter(
+                torch.randn(hidden_dim), requires_grad=False)
+            self.spectral_u_buffers[f'encoder_{i}_lin_r_u'] = nn.Parameter(
+                torch.randn(hidden_dim), requires_grad=False)
+            self.spectral_u_buffers[f'decoder_{i}_lin_l_u'] = nn.Parameter(
+                torch.randn(hidden_dim), requires_grad=False)
+            self.spectral_u_buffers[f'decoder_{i}_lin_r_u'] = nn.Parameter(
+                torch.randn(hidden_dim), requires_grad=False)
+
+    def apply_spectral_norm_to_conv(self, conv, layer_idx, conv_type='encoder'):
+        if hasattr(conv, 'lin_l') and conv.lin_l is not None:
+            u_key = f'{conv_type}_{layer_idx}_lin_l_u'
+            if u_key in self.spectral_u_buffers:
+                weight = conv.lin_l.weight
+                u = self.spectral_u_buffers[u_key]
+                normalized_weight, new_u = apply_spectral_norm_dynamic(weight, u)
+                conv.lin_l.weight.data = normalized_weight
+                self.spectral_u_buffers[u_key].data = new_u
+        
+        if hasattr(conv, 'lin_r') and conv.lin_r is not None:
+            u_key = f'{conv_type}_{layer_idx}_lin_r_u'
+            if u_key in self.spectral_u_buffers:
+                weight = conv.lin_r.weight
+                u = self.spectral_u_buffers[u_key]
+                normalized_weight, new_u = apply_spectral_norm_dynamic(weight, u)
+                conv.lin_r.weight.data = normalized_weight
+                self.spectral_u_buffers[u_key].data = new_u
         
     def encode_heterograph(self, x_dict, edge_index_dict):
         if 'case' in x_dict:
@@ -824,6 +836,8 @@ class FusionGNN(nn.Module):
         x = fusion_features
         
         for i, conv in enumerate(self.encoder_convs):
+            self.apply_spectral_norm_to_conv(conv, i, 'encoder')
+            
             if fusion_edge_index.numel() == 0 and x.numel() > 0:
                 x = conv(x, fusion_edge_index)
             else:
@@ -873,6 +887,8 @@ class FusionGNN(nn.Module):
             x = self.proj(attention_input)
         
         for i, conv in enumerate(self.decoder_convs):
+            self.apply_spectral_norm_to_conv(conv, i, 'decoder')
+            
             if isinstance(fusion_edge_index, dict):
                 x_dict = {}
                 x_dict['fusion'] = x
@@ -942,7 +958,7 @@ class FusionGNN(nn.Module):
         return self.prediction_head(node_features)
 
     def forward(self, sequence, temporal_info=None, pred_temporal_info=None):
-
+        
         device = self.device
         seq_len = len(sequence)                       # T
         batch_size = len(sequence[0])                    # B
@@ -978,6 +994,8 @@ class FusionGNN(nn.Module):
 
         x_original = x.clone()
         for i, conv in enumerate(self.encoder_convs):
+            self.apply_spectral_norm_to_conv(conv, i, 'encoder')
+            
             x_conv = conv(x, edge_index)
             x = x_conv + x
             x = F.relu(x)
@@ -1065,7 +1083,7 @@ class FusionGNN(nn.Module):
                                               prev_feat,
                                               step_time_info)
                 
-                decoded = (1 - self.previous_weight - 0.3) * decoded + self.previous_weight * prev_feat + 0.3 * initial_hidden
+                decoded = (1 - self.previous_weight - self.initial_weight) * decoded + self.previous_weight * prev_feat + self.initial_weight * initial_hidden
                 
                 step_predictions = []
                 for node_idx in range(node_count):
