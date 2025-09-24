@@ -26,8 +26,8 @@ The framework 1) builds heterogeneous graphs from multiple information sources a
 # 1. Clone the repo
 
 # 2. Create environment (CUDA 11.8 example)
-$ conda create -n fusiongnn python=3.10
-$ conda activate fusiongnn
+$ conda create -n blue python=3.10
+$ conda activate blue
 
 # 3. Install PyTorch + PyG (adjust CUDA version if needed)
 $ pip install -r requirements.txt  # numpy, pandas, scikit‑learn, tqdm, tensorboard, pytorch, torch_geometric, scatter, etc.
@@ -51,17 +51,27 @@ Each file **must** contain:
 
 ```bash
 python spectral_simple_main.py \
-  --dataset 'avian' \
-  --data_dir './sampled_processed_graphs' \
-  --model_type 'FusionGNN' \
-  --window_size 4 \
-  --pred_horizon 4 \
-  --hidden_dim 8 \
-  --epochs 100 \
-  --batch_size 8 \
-  --lr 1e-5 \
-  --num_mrf 1 \
-  --spectral_gamma 0.1
+    --dataset avian \
+    --batch_size 4 \
+    --window_size 4 \
+    --pred_horizon 4 \
+    --hidden_dim 16 \
+    --lr 0.001 \
+    --weight_decay 0.0001 \
+    --dropout 0.3 \
+    --epochs 100 \
+    --spectral_gamma 0.9 \
+    --loss_type 'infection_weighted' \
+    --use_eigenvalue_constraint True \
+    --eigenvalue_loss_type cosine_similarity \
+    --spectral_k 10 \
+    --infection_zero_weight 1.0 \
+    --infection_low_weight 8.0 \
+    --infection_med_weight 15.0 \
+    --infection_high_weight 25.0 \
+    --infection_low_threshold 1.0 \
+    --infection_med_threshold 5.0 \
+    --infection_high_threshold 20.0
 ```
 
 | Flag             | Meaning                           | Default |
@@ -69,11 +79,11 @@ python spectral_simple_main.py \
 | --window_size    | $w$ historic weeks fed to encoder | 4       |
 | --pred_horizon   | $h$ weeks to forecast             | 4       |
 | --num_mrf        | MRF smoothing layers              | 1       |
-| --spectral_gamma | weight of spectral approximation  | 0.1     |
+| --spectral_gamma | weight of spectral approximation  | 0.9     |
 
 `spectral_simple_main.py --help` prints the full list.
 
-During training the script will output fold‑wise **MAE / RMSE / F1 / Pearson** and save the best model to `./save_results/`.
+During training the script will output fold‑wise **MAE / RMSE / F1 / Pearson / Spearman** and save the best model to `./save_results/`.
 
 ---
 
@@ -84,6 +94,7 @@ The following metrics are computed (see `metrics.py`):
 * **MAE** – Mean Absolute Error
 * **RMSE** – Root Mean Squared Error
 * **Pearson** - Pearson correlations
+* **Spearman** - Spearman correlations
 * **F1 Score** - F1 Score
 
 We adapted parts of the implementation (data split and evaluation metrics) from the open-source GitHub repository [EAST-Net] (https://github.com/underdoc-wang/EAST-Net), modifying it to fit the specific requirements of our study.
