@@ -119,7 +119,7 @@ class ModelEvaluator(object):
     def one_step_eval_num(self, y_pred_step: np.array, y_true_step: np.array, current_step_idx: int, run_plots_dir: str, mode_name: str):
         assert y_pred_step.shape == y_true_step.shape
 
-        MSEs, RMSEs, MAEs, MAPEs, F1s, Pearsons = [], [], [], [], [], []
+        MSEs, RMSEs, MAEs, MAPEs, F1s, Precisions, Recalls, FPRs, Pearsons, Spearmans = [], [], [], [], [], [], [], [], [], []
         print('y_pred_step.shape', y_pred_step.shape)
         for c in range(y_pred_step.shape[-1]):
             if c == 0:
@@ -136,17 +136,36 @@ class ModelEvaluator(object):
                 else:
                     y_true_numpy_c = np.asarray(y_true_step_c)
 
+                pred_heatmap_filename = os.path.join(run_plots_dir, f"step{current_step_idx}_channel{c}_pred_heatmap.png")
+                true_heatmap_filename = os.path.join(run_plots_dir, f"step{current_step_idx}_channel{c}_true_heatmap.png")
+                
+                pred_title = f"Predicted Values Heatmap (Mode: {mode_name}, Step: {current_step_idx}, Channel: {c})"
+                true_title = f"True Values Heatmap (Mode: {mode_name}, Step: {current_step_idx}, Channel: {c})"
+
+                self.plot_value_heatmap(y_pred_numpy_c, pred_title, pred_heatmap_filename)
+                self.plot_value_heatmap(y_true_numpy_c, true_title, true_heatmap_filename)
+
                 MSE_c = self.MSE(y_pred_numpy_c, y_true_numpy_c)
                 RMSE_c = self.RMSE(y_pred_numpy_c, y_true_numpy_c)
                 MAE_c = self.MAE(y_pred_numpy_c, y_true_numpy_c)
+                MAPE_c = self.MAPE(y_pred_numpy_c, y_true_numpy_c)
                 F1_c = self.F1_score(y_pred_numpy_c, y_true_numpy_c)
+                Precision_c = self.precision_score(y_pred_numpy_c, y_true_numpy_c)
+                Recall_c = self.recall_score(y_pred_numpy_c, y_true_numpy_c)
+                FPR_c = self.false_positive_rate(y_pred_numpy_c, y_true_numpy_c)
                 Pearson_c = self.pearson_corr(y_pred_numpy_c, y_true_numpy_c)
-                print(f'MSE: {MSE_c:11.4f}, RMSE: {RMSE_c:9.4f}, MAE: {MAE_c:9.4f}, F1: {F1_c:9.4f}, Pearson: {Pearson_c:9.4f}')
+                Spearman_c = self.spearman_corr(y_pred_numpy_c, y_true_numpy_c)
+                print(f'MSE: {MSE_c:11.4f}, RMSE: {RMSE_c:9.4f}, MAE: {MAE_c:9.4f}, MAPE: {MAPE_c:9.4%}, F1: {F1_c:9.4f}, Precision: {Precision_c:9.4f}, Recall: {Recall_c:9.4f}, FPR: {FPR_c:9.4f}, Pearson: {Pearson_c:9.4f}, Spearman: {Spearman_c:9.4f}')
                 MSEs.append(MSE_c)
                 RMSEs.append(RMSE_c)
                 MAEs.append(MAE_c)
+                MAPEs.append(MAPE_c)
                 F1s.append(F1_c)
+                Precisions.append(Precision_c)
+                Recalls.append(Recall_c)
+                FPRs.append(FPR_c)
                 Pearsons.append(Pearson_c)
+                Spearmans.append(Spearman_c)
             else:
                 continue
 
@@ -154,13 +173,20 @@ class ModelEvaluator(object):
         step_metrics['mse'] = np.mean(MSEs)
         step_metrics['rmse'] = np.mean(RMSEs)
         step_metrics['mae'] = np.mean(MAEs)
+        step_metrics['mape'] = np.nanmean(MAPEs)
         step_metrics['f1'] = np.mean(F1s)
+        step_metrics['precision'] = np.mean(Precisions)
+        step_metrics['recall'] = np.mean(Recalls)
+        step_metrics['fpr'] = np.mean(FPRs)
         step_metrics['pearson'] = np.mean(Pearsons)
+        step_metrics['spearman'] = np.mean(Spearmans)
         
         print('Overall: \n'
               f'   MSE: {step_metrics["mse"]:10.4f}, RMSE: {step_metrics["rmse"]:9.4f} \n'
-              f'   MAE: {step_metrics["mae"]:10.4f}, F1: {step_metrics["f1"]:10.4f} \n'
-              f'   Pearson: {step_metrics["pearson"]:9.4f} \n')
+              f'   MAE: {step_metrics["mae"]:10.4f}, MAPE: {step_metrics["mape"]:9.4%} \n'
+              f'   F1: {step_metrics["f1"]:10.4f}, Precision: {step_metrics["precision"]:9.4f} \n'
+              f'   Recall: {step_metrics["recall"]:9.4f}, FPR: {step_metrics["fpr"]:9.4f} \n'
+              f'   Pearson: {step_metrics["pearson"]:9.4f}, Spearman: {step_metrics["spearman"]:9.4f} \n')
         
         return step_metrics
 
@@ -196,11 +222,19 @@ class ModelEvaluator(object):
         return np.mean(np.abs(y_pred - y_true))
 
     @staticmethod
+    def MAPE(y_pred: np.array, y_true: np.array):
+        if hasattr(y_pred, 'detach') and hasattr(y_pred, 'cpu') and hasattr(y_pred, 'numpy'):
+            y_pred = y_pred.detach().cpu().numpy()
+        if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
+            y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred)
+        y_true = np.asarray(y_true)
+        greater_than_ = y_true > 10
+        y_pred, y_true = y_pred[greater_than_], y_true[greater_than_]
+        return np.mean(np.abs(y_pred - y_true) / np.abs(y_true))
+
+    @staticmethod
     def F1_score(y_pred: np.array, y_true: np.array):
-        """
-        Calculate F1 score based on the presence of cases.
-        Only considers whether a location has cases or not (binary), not the actual count.
-        """
         if hasattr(y_pred, 'detach') and hasattr(y_pred, 'cpu') and hasattr(y_pred, 'numpy'):
             y_pred = y_pred.detach().cpu().numpy()
         if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
@@ -222,10 +256,61 @@ class ModelEvaluator(object):
         return f1
 
     @staticmethod
+    def precision_score(y_pred: np.array, y_true: np.array):
+        if hasattr(y_pred, 'detach') and hasattr(y_pred, 'cpu') and hasattr(y_pred, 'numpy'):
+            y_pred = y_pred.detach().cpu().numpy()
+        if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
+            y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred)
+        y_true = np.asarray(y_true)
+        y_pred_binary = (y_pred > 0).astype(np.int32)
+        y_true_binary = (y_true > 0).astype(np.int32)
+        
+        true_positives = np.sum(y_pred_binary * y_true_binary)
+        false_positives = np.sum(y_pred_binary * (1 - y_true_binary))
+        
+        precision = true_positives / (true_positives + false_positives + 1e-10)
+        
+        return precision
+
+    @staticmethod
+    def recall_score(y_pred: np.array, y_true: np.array):
+        if hasattr(y_pred, 'detach') and hasattr(y_pred, 'cpu') and hasattr(y_pred, 'numpy'):
+            y_pred = y_pred.detach().cpu().numpy()
+        if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
+            y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred)
+        y_true = np.asarray(y_true)
+        y_pred_binary = (y_pred > 0).astype(np.int32)
+        y_true_binary = (y_true > 0).astype(np.int32)
+        
+        true_positives = np.sum(y_pred_binary * y_true_binary)
+        false_negatives = np.sum((1 - y_pred_binary) * y_true_binary)
+        
+        recall = true_positives / (true_positives + false_negatives + 1e-10)
+        
+        return recall
+
+    @staticmethod
+    def false_positive_rate(y_pred: np.array, y_true: np.array):
+        if hasattr(y_pred, 'detach') and hasattr(y_pred, 'cpu') and hasattr(y_pred, 'numpy'):
+            y_pred = y_pred.detach().cpu().numpy()
+        if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
+            y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred)
+        y_true = np.asarray(y_true)
+        y_pred_binary = (y_pred > 0).astype(np.int32)
+        y_true_binary = (y_true > 0).astype(np.int32)
+        
+        false_positives = np.sum(y_pred_binary * (1 - y_true_binary))
+        true_negatives = np.sum((1 - y_pred_binary) * (1 - y_true_binary))
+        
+        fpr = false_positives / (false_positives + true_negatives + 1e-10)
+        
+        return fpr
+
+    @staticmethod
     def pearson_corr(y_pred: np.array, y_true: np.array):
-        """
-        Calculate Spearman rank correlation coefficient between predictions and ground truth.
-        """
         if hasattr(y_pred, 'detach') and hasattr(y_pred, 'cpu') and hasattr(y_pred, 'numpy'):
             y_pred = y_pred.detach().cpu().numpy()
         if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
@@ -236,6 +321,24 @@ class ModelEvaluator(object):
         y_true_flat = y_true.flatten()
         
         correlation, _ = pearsonr(y_pred_flat, y_true_flat)
+        
+        if np.isnan(correlation):
+            return 0.0
+            
+        return correlation
+
+    @staticmethod
+    def spearman_corr(y_pred: np.array, y_true: np.array):
+        if hasattr(y_pred, 'detach') and hasattr(y_pred, 'cpu') and hasattr(y_pred, 'numpy'):
+            y_pred = y_pred.detach().cpu().numpy()
+        if hasattr(y_true, 'detach') and hasattr(y_true, 'cpu') and hasattr(y_true, 'numpy'):
+            y_true = y_true.detach().cpu().numpy()
+        y_pred = np.asarray(y_pred)
+        y_true = np.asarray(y_true)
+        y_pred_flat = y_pred.flatten()
+        y_true_flat = y_true.flatten()
+        
+        correlation, _ = spearmanr(y_pred_flat, y_true_flat)
         
         if np.isnan(correlation):
             return 0.0
