@@ -65,6 +65,9 @@ class SimpleGraphDataset(Dataset):
         if self.dataset == 'japan':
             japan_files = glob.glob(os.path.join(self.graphs_dir, "japan_week_*.pt"))
             graph_files += japan_files
+        elif self.dataset == 'state':
+            state_files = glob.glob(os.path.join(self.graphs_dir, "state_week_*.pt"))
+            graph_files += state_files
         
         print(f"Found {len(graph_files)} graph files ({len(graph_files_pt)} .pt files, {len(graph_files_pkl)} .pkl files)")
         
@@ -86,6 +89,14 @@ class SimpleGraphDataset(Dataset):
                         self.time_points.append((year, week, file_path))
                     else:
                         print(f"Skipping file with invalid japan format: {filename}")
+                elif self.dataset == 'state' and filename.startswith('state_week_') and filename.endswith('.pt'):
+                    match = re.match(r'state_week_(\d+)', filename.replace('.pt', ''))
+                    if match:
+                        year = 0
+                        week = int(match.group(1))
+                        self.time_points.append((year, week, file_path))
+                    else:
+                        print(f"Skipping file with invalid state format: {filename}")
                 else:
                     if "pyg_" in filename:
                         base_name = filename.replace('pyg_', '').replace('.pt', '').replace('.pkl', '')
@@ -236,12 +247,15 @@ class SimpleGraphDataset(Dataset):
             elif self.norm_mode == 'log_minmax':
                 log_min = self.norm_list[c]['log_min']
                 log_max = self.norm_list[c]['log_max']
+                # 应用log变换
                 log_transformed = torch.log(x[..., c] + self.epsilon)
+                # 应用min-max归一化
                 denominator = log_max - log_min
                 denominator = torch.where(denominator == 0, torch.ones_like(denominator), denominator)
                 flow_c = (log_transformed - log_min) / denominator
                 x_norm.append(flow_c)
             elif self.norm_mode == 'log_plus_one':
+                # 直接应用log(y+1)变换
                 flow_c = torch.log(x[..., c] + 1.0)
                 x_norm.append(flow_c)
             else:
@@ -268,9 +282,16 @@ class SimpleGraphDataset(Dataset):
         return y_denorm
     
     def minmax_normalize(self, x):
-        """Min-max normalization to [0, 1]."""  
+        """Min-max normalization to [0, 1]."""
+        # x_max = x.max()
+        # x_min = x.min()
+        # denominator = x_max - x_min
+        # denominator = torch.where(denominator == 0, torch.ones_like(denominator), denominator)
+        # x = (x - x_min) / denominator
+        # return x, x_min, x_max
         x_max, x_min = x.max(), x.min()
         x = (x - x_min) / (x_max - x_min)
+        #x = x * 2 - 1
         return x, x_min, x_max
     
     def minmax_denormalize(self, x, c):
@@ -401,8 +422,9 @@ class SimpleGraphDataset(Dataset):
                     print(f'channel {c}, raw_min: {all_features[:, c].min()}, raw_max: {all_features[:, c].max()}, '
                           f'zeros: {zeros_pct:.1f}%, log_min: {log_min}, log_max: {log_max}')
             elif self.norm_mode == 'log_plus_one':
+                # 对于log_plus_one模式，我们不需要保存任何参数，因为变换是固定的
                 for c in range(all_features.shape[1]):
-                    self.norm_list.append({})
+                    self.norm_list.append({})  # 空字典作为占位符
                     zeros_pct = (all_features[:, c] == 0).float().mean() * 100
                     print(f'channel {c}, raw_min: {all_features[:, c].min()}, raw_max: {all_features[:, c].max()}, '
                           f'zeros: {zeros_pct:.1f}%, using log(y+1) transform')
@@ -526,7 +548,7 @@ class SimpleGraphDataset(Dataset):
                 county_features = pyg_graph.x_dict['county']
                 normalized_features = self.channel_wise_normalize(county_features)
                 ids = list(range(len(normalized_features)))
-                if self.dataset == 'japan':
+                if self.dataset == 'japan' or self.dataset == 'state':
                     counts = normalized_features[:, 0]
                 else:
                     counts = normalized_features[:, 0]
@@ -541,10 +563,12 @@ class SimpleGraphDataset(Dataset):
             
             year_encoding, week_encoding = self.encode_temporal_info(year, week)
             target_temporal_info.append((year_encoding, week_encoding))
-            if self.dataset == 'japan':
+            if self.dataset == 'japan' or self.dataset == 'state':
                 time_features_list.append((counts))
             else:
-                time_features_list.append((counts, abundances))
+                # time_features_list.append((counts, abundances))
+                time_features_list.append((counts))
+                
             
         
         if time_features_list:
@@ -552,7 +576,8 @@ class SimpleGraphDataset(Dataset):
                 if self.dataset == 'japan':
                     counts = time_features_list[t]
                 else:
-                    counts, abundances = time_features_list[t]
+                    # counts, abundances = time_features_list[t]
+                    counts = time_features_list[t]
                 target_values.append(torch.stack([counts], dim=-1))
 
         return input_graphs, target_values, county_ids, (temporal_info, target_temporal_info)
